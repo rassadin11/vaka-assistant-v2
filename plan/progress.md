@@ -5,7 +5,7 @@
 ## Этап 0. Подготовка
 - [x] 0.1 Документ требований (2026-07-09, plan/requirements.md)
 - [x] 0.2 Репозиторий (monorepo, pre-commit, pytest) (2026-07-09, initial commit: uv, ruff, mypy strict, pytest, pre-commit hooks установлены, Dockerfile собирается)
-- [ ] 0.3 CI — workflow готов (.github/workflows/ci.yml: lint, test, gitleaks, build); приёмка после первого зелёного прогона на GitHub (см. блокер)
+- [x] 0.3 CI (2026-07-09, зелёный прогон: lint, test, gitleaks, docker build — github.com/rassadin11/vaka-assistant-v2, run 29022815257)
 - [ ] 0.4 Окружения dev/prod
 - [ ] 0.5 Регистрации (BotFather, OpenRouter, Google Cloud + заявка, домен, Tribute)
 - [ ] 0.6 Privacy policy опубликована; черновик оферты
@@ -96,6 +96,6 @@
 - [ ] После этапа 4
 
 ## Блокеры
-- 0.3: нужен GitHub-репозиторий (создать + запушить; gh CLI на машине нет). После первого зелёного прогона Actions отметить 0.3.
-- 0.5: регистрации выполняет владелец: BotFather (тест+бой), OpenRouter (ключ + лимиты расходов), Google Cloud проект + consent screen, домен, Tribute (можно к этапу 7).
-- 0.6/№10: privacy policy публикуется после выбора домена; заявка в Google — после публикации.
+- 0.5 (частично): BotFather (тест+бой) и OpenRouter — готово 2026-07-09, токены в локальном bootstrap.env до Infisical (1.5); проверить лимит расходов в OpenRouter. Остаются: Google Cloud + consent screen, домен, Tribute (к этапу 7).
+- 0.6/№10: privacy policy публикуется после выбора домена; заявка в Google — после публикации. Вернуться не позже конца этапа 2 (верификация — недели, критический путь к 4.7).
+- Перед публичным запуском: перевыпустить OpenRouter-ключ и боевой токен бота (засветились в чате при передаче 2026-07-09).
