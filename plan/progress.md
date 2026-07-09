@@ -16,7 +16,7 @@
 - [x] 1.3 Роли БД + хелпер SET LOCAL + RLS-тест (2026-07-09, core/db.py + init-roles.sql; RLS-шаблон уточнён в db-schema.md — fail-closed NULLIF; commit 357c310)
 - [x] 1.4 Два Redis (2026-07-09, в составе 1.1: noeviction+AOF / allkeys-lru без персистентности, проверено config get)
 - [ ] 1.5 Infisical + machine identities
-- [ ] 1.6 Миграция v1 (13 таблиц по db-schema.md)
+- [x] 1.6 Миграция v1 (13 таблиц по db-schema.md) (2026-07-09, Codex + opus-ревью против спеки + приёмка Claude; уточнения спеки: RLS-шаблон fail-closed, user_id NOT NULL; commit 7875092)
 - [ ] 1.7 Envelope-шифрование oauth_tokens
 - [ ] 1.8 Бэкапы + restore-to-dev.sh
 
