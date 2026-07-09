@@ -50,4 +50,5 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "integration: tests that require the local docker compose infrastructure",
+    "slow: tests that exercise slower end-to-end reliability flows",
 ]

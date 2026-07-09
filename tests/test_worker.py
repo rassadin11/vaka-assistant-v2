@@ -41,6 +41,8 @@ class FakeQueueRedis:
         self.dlq_entries: list[tuple[str, dict[str, str]]] = []
         self.groups_created: list[tuple[str, str]] = []
         self.autoclaim_responses: dict[str, list[tuple[str, dict[str, str]]]] = {}
+        self.pending_range_responses: dict[tuple[str, str], list[list[dict[str, object]]]] = {}
+        self.stream_entries: dict[tuple[str, str], dict[str, str]] = {}
 
     async def set(
         self,
@@ -94,8 +96,13 @@ class FakeQueueRedis:
         min: str,
         max: str,
         count: int,
-    ) -> list[dict[str, int]]:
-        del groupname, max, count
+    ) -> list[dict[str, object]]:
+        del groupname, count
+        if min == "-":
+            responses = self.pending_range_responses.get((name, max), [])
+            if responses:
+                return responses.pop(0)
+            return []
         return [{"times_delivered": self.pending_counts.get((name, min), 1)}]
 
     async def xack(self, name: str, groupname: str, *ids: str) -> int:
@@ -108,6 +115,20 @@ class FakeQueueRedis:
         if name == DLQ_STREAM:
             self.dlq_entries.append((name, fields))
         return "9-0"
+
+    async def xrange(
+        self,
+        name: str,
+        min: str,
+        max: str,
+        *,
+        count: int | None = None,
+    ) -> list[tuple[str, dict[str, str]]]:
+        del max, count
+        fields = self.stream_entries.get((name, min))
+        if fields is None:
+            return []
+        return [(min, fields)]
 
     async def xautoclaim(
         self,
@@ -213,7 +234,12 @@ def _worker(
             notify_admin=local_callbacks.notify_admin,
             config=config
             if config is not None
-            else WorkerConfig(reclaim_interval_seconds=999, lock_retry_sleep_seconds=0),
+            else WorkerConfig(
+                reclaim_interval_seconds=999,
+                lock_retry_sleep_seconds=0,
+                lock_wait_timeout_seconds=0,
+                stream_order_wait_timeout_seconds=0,
+            ),
         ),
         local_callbacks,
     )
@@ -333,6 +359,36 @@ async def test_multi_partition_read_processes_every_delivered_message() -> None:
     assert [envelope.update_id for envelope in processor.envelopes] == [301, 302]
     assert callbacks.replies == [(42, "hello"), (43, "hello")]
     assert {entry_id for _, _, entry_id in queue_redis.acked} == {"1-0", "2-0"}
+
+
+async def test_stream_order_yields_when_older_same_user_entry_is_pending() -> None:
+    queue_redis = FakeQueueRedis()
+    stream = stream_key("interactive", 0)
+    envelope = _envelope(update_id=401)
+    older = _envelope(update_id=400)
+    queue_redis.read_responses["interactive"].append(
+        [[stream, [("2-0", envelope.to_stream_entry())]]]
+    )
+    queue_redis.stream_entries[(stream, "1-0")] = older.to_stream_entry()
+    queue_redis.pending_range_responses[(stream, "2-0")] = [
+        [{"message_id": "1-0", "times_delivered": 1}],
+        [],
+    ]
+    worker, callbacks = _worker(
+        queue_redis,
+        FakeCacheRedis(),
+        config=WorkerConfig(
+            reclaim_interval_seconds=999,
+            lock_retry_sleep_seconds=0,
+            stream_order_retry_sleep_seconds=0,
+            stream_order_wait_timeout_seconds=0,
+        ),
+    )
+
+    assert await worker.run_once()
+
+    assert callbacks.replies == []
+    assert queue_redis.acked == []
 
 
 async def test_reclaim_processes_every_claimed_message() -> None:

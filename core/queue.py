@@ -181,6 +181,42 @@ async def delivery_count(
     return _pending_delivery_count(cast("object", pending[0]))
 
 
+async def has_pending_predecessor(
+    redis: Redis,
+    queue: QueueName,
+    stream: str,
+    entry_id: str,
+    *,
+    user_id: int | None = None,
+) -> bool:
+    """Return whether an older pending entry exists in the same stream.
+
+    When ``user_id`` is provided, only older entries for that user are
+    considered predecessors. That preserves per-user order without letting
+    unrelated stale entries in a shared partition stall the user.
+    """
+
+    # The count must comfortably exceed any realistic number of in-flight
+    # entries per partition: a predecessor missed here is a silent per-user
+    # order violation.
+    pending = await redis.xpending_range(
+        stream,
+        CONSUMER_GROUPS[queue],
+        min="-",
+        max=entry_id,
+        count=128,
+    )
+    for pending_entry in pending:
+        pending_entry_id = _pending_entry_id(cast("object", pending_entry))
+        if pending_entry_id is None or not _stream_id_less(pending_entry_id, entry_id):
+            continue
+        if user_id is None or await _pending_entry_matches_user(
+            redis, stream, pending_entry_id, user_id
+        ):
+            return True
+    return False
+
+
 async def reclaim_stale_pending(
     redis: Redis,
     queue: QueueName,
@@ -292,6 +328,47 @@ def _pending_delivery_count(pending_entry: object) -> int:
         return 1
     raw_sequence = cast("Any", pending_entry)
     return int(raw_sequence[3])
+
+
+def _pending_entry_id(pending_entry: object) -> str | None:
+    if isinstance(pending_entry, dict):
+        for key in ("message_id", b"message_id"):
+            raw_value = pending_entry.get(key)
+            if raw_value is not None:
+                return _to_text(raw_value)
+        return None
+    raw_sequence = cast("Any", pending_entry)
+    if not raw_sequence:
+        return None
+    return _to_text(raw_sequence[0])
+
+
+async def _pending_entry_matches_user(
+    redis: Redis,
+    stream: str,
+    entry_id: str,
+    user_id: int,
+) -> bool:
+    entries = await redis.xrange(stream, entry_id, entry_id, count=1)
+    if not entries:
+        return False
+    _entry_id, fields = entries[0]
+    try:
+        envelope = UpdateEnvelope.from_stream_entry(cast("dict[str | bytes, str | bytes]", fields))
+    except ValueError:
+        return False
+    return envelope.user_id == user_id
+
+
+def _stream_id_less(left: str, right: str) -> bool:
+    left_ms, left_seq = _parse_stream_id(left)
+    right_ms, right_seq = _parse_stream_id(right)
+    return (left_ms, left_seq) < (right_ms, right_seq)
+
+
+def _parse_stream_id(entry_id: str) -> tuple[int, int]:
+    milliseconds, sequence = entry_id.split("-", maxsplit=1)
+    return int(milliseconds), int(sequence)
 
 
 def _to_text(value: object) -> str:

@@ -25,6 +25,7 @@ from core.queue import (
     decode_read_group_response,
     delivery_count,
     ensure_groups,
+    has_pending_predecessor,
     move_to_dlq,
     read_group,
     reclaim_stale_pending,
@@ -70,6 +71,9 @@ class WorkerConfig:
     max_deliveries: int = DEFAULT_MAX_DELIVERIES
     typing_interval_seconds: float = 5.0
     lock_retry_sleep_seconds: float = 0.25
+    lock_wait_timeout_seconds: float = 5.0
+    stream_order_retry_sleep_seconds: float = 0.05
+    stream_order_wait_timeout_seconds: float = 2.0
     reconnect_backoff_initial_seconds: float = 0.5
     reconnect_backoff_max_seconds: float = 10.0
     process_timeout_seconds: float = 120.0
@@ -194,15 +198,24 @@ class Worker:
             extra=log_extra,
         )
 
-        locked = await acquire_user_lock(
-            self._queue_redis,
-            envelope.user_id,
-            self._config.worker_token,
-            ttl_ms=self._config.lock_ttl_ms,
-        )
-        if not locked:
+        if not await self._wait_for_stream_predecessors(message):
+            return
+
+        lock_wait_deadline = time.monotonic() + self._config.lock_wait_timeout_seconds
+        while not self._stop_event.is_set():
+            locked = await acquire_user_lock(
+                self._queue_redis,
+                envelope.user_id,
+                self._config.worker_token,
+                ttl_ms=self._config.lock_ttl_ms,
+            )
+            if locked:
+                break
             self._logger.info("user lock busy", extra=log_extra)
+            if time.monotonic() >= lock_wait_deadline:
+                return
             await asyncio.sleep(self._config.lock_retry_sleep_seconds)
+        else:
             return
 
         try:
@@ -264,6 +277,22 @@ class Worker:
             message.stream,
             message.entry_id,
         )
+
+    async def _wait_for_stream_predecessors(self, message: QueueMessage) -> bool:
+        deadline = time.monotonic() + self._config.stream_order_wait_timeout_seconds
+        while not self._stop_event.is_set():
+            if not await has_pending_predecessor(
+                self._queue_redis,
+                message.queue,
+                message.stream,
+                message.entry_id,
+                user_id=message.envelope.user_id,
+            ):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(self._config.stream_order_retry_sleep_seconds)
+        return False
 
     async def _process_with_typing(self, envelope: UpdateEnvelope) -> str | None:
         await self._send_typing(envelope.chat_id)
