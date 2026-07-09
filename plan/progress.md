@@ -15,7 +15,7 @@
 - [x] 1.2 PgBouncer × asyncpg smoke-тест (2026-07-09, Codex + приёмка Claude; в CI, commit 357c310)
 - [x] 1.3 Роли БД + хелпер SET LOCAL + RLS-тест (2026-07-09, core/db.py + init-roles.sql; RLS-шаблон уточнён в db-schema.md — fail-closed NULLIF; commit 357c310)
 - [x] 1.4 Два Redis (2026-07-09, в составе 1.1: noeviction+AOF / allkeys-lru без персистентности, проверено config get)
-- [ ] 1.5 Infisical + machine identities
+- [x] 1.5 Infisical + machine identities (2026-07-09, идемпотентный bootstrap, 3 identity верифицированы, core/secrets.py; учётки вне репо; Codex + приёмка Claude; commit de161cc)
 - [x] 1.6 Миграция v1 (13 таблиц по db-schema.md) (2026-07-09, Codex + opus-ревью против спеки + приёмка Claude; уточнения спеки: RLS-шаблон fail-closed, user_id NOT NULL; commit 7875092)
 - [x] 1.7 Envelope-шифрование oauth_tokens (2026-07-09, core/crypto.py: AES-256-GCM, версионируемый KEK, key_version в AAD; Codex + приёмка Claude; commit 46d4360)
 - [ ] 1.8 Бэкапы + restore-to-dev.sh
