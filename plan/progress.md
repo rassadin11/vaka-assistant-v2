@@ -11,10 +11,10 @@
 - [ ] 0.6 Privacy policy опубликована; черновик оферты
 
 ## Этап 1A. Локальная инфраструктура
-- [ ] 1.1 docker-compose dev (`make dev-up`)
+- [x] 1.1 docker-compose dev (`make dev-up`) (2026-07-09, Codex + приёмка Claude; commit 68d0eb8)
 - [ ] 1.2 PgBouncer × asyncpg smoke-тест
 - [ ] 1.3 Роли БД + хелпер SET LOCAL + RLS-тест
-- [ ] 1.4 Два Redis
+- [x] 1.4 Два Redis (2026-07-09, в составе 1.1: noeviction+AOF / allkeys-lru без персистентности, проверено config get)
 - [ ] 1.5 Infisical + machine identities
 - [ ] 1.6 Миграция v1 (13 таблиц по db-schema.md)
 - [ ] 1.7 Envelope-шифрование oauth_tokens
