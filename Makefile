@@ -1,4 +1,4 @@
-.PHONY: lint test test-integration gitleaks dev-up dev-down dev-destroy db-roles
+.PHONY: lint test test-integration gitleaks dev-up dev-down dev-destroy db-roles migrate
 
 lint:
 	uv run ruff check .
@@ -26,3 +26,6 @@ dev-destroy:
 
 db-roles:
 	docker compose -f infra/docker-compose.dev.yml exec -T postgres psql -U assistant -d assistant -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/10-init-roles.sql
+
+migrate:
+	uv run alembic upgrade head

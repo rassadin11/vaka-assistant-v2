@@ -74,3 +74,19 @@ make dev-down
 ```bash
 make dev-destroy
 ```
+
+## Миграции БД
+
+PostgreSQL собирается из локального образа `infra/postgres/Dockerfile`: он основан на
+`pgvector/pgvector:pg16` и дополнительно устанавливает `postgresql-16-partman`, потому
+что миграция v1 использует `pg_partman` для месячных партиций `tool_calls_log` и `usage`.
+После смены образа для старого dev-volume выполните `make dev-destroy`, затем `make dev-up`.
+
+Миграции запускаются ролью `migrator` напрямую в PostgreSQL на `:5432`, не через PgBouncer:
+
+```bash
+make migrate
+```
+
+URL можно переопределить через `MIGRATIONS_DATABASE_URL`; значение по умолчанию —
+`postgresql+psycopg://migrator:dev-local-only@127.0.0.1:5432/assistant`.

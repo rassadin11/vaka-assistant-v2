@@ -36,6 +36,7 @@ jobs:
           python-version: "3.12"
       - run: uv sync --dev
       - run: docker compose -f infra/docker-compose.dev.yml up -d --wait
+      - run: uv run alembic upgrade head
       - run: uv run pytest -v -m integration
       - if: always()
         run: docker compose -f infra/docker-compose.dev.yml down -v

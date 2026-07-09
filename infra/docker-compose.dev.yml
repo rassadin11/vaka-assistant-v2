@@ -2,7 +2,9 @@ name: personal-assistant-dev
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    build:
+      context: ./postgres
+    image: personal-assistant-postgres:pg16-partman
     environment:
       POSTGRES_USER: assistant
       POSTGRES_PASSWORD: dev-local-only
