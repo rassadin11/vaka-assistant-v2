@@ -41,6 +41,27 @@ redis-cli -p 6380 PING
 
 Infisical UI доступен по адресу: http://localhost:8880
 
+## Infisical bootstrap
+
+Локальный Infisical инициализируется dev-only скриптом:
+
+```bash
+make infisical-bootstrap
+```
+
+Скрипт создает начального администратора, проект `personal-assistant`, окружение `dev`,
+machine identities `gateway`, `worker`, `scheduler`, выдает им read-доступ к секретам
+и проверяет Universal Auth login + чтение секретов.
+
+Входные dev-секреты можно положить вне репозитория в
+`C:\Users\Artem\.assistant\bootstrap.env`: `TELEGRAM_BOT_TOKEN_PROD`,
+`TELEGRAM_BOT_TOKEN_TEST`, `OPENROUTER_API_KEY`. Если файла нет, эти значения
+просто пропускаются. `OAUTH_KEK` генерируется автоматически и хранится в Infisical.
+
+Учетные данные администратора и client ID/secret machine identities записываются только в
+`C:\Users\Artem\.assistant\infisical-dev.env`. Это локальные dev-only секреты: не
+копируйте их в репозиторий, issue, логи или документацию.
+
 ## Роли БД
 
 Основная БД использует три dev-роли приложения:

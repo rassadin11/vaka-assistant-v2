@@ -1,4 +1,6 @@
-.PHONY: lint test test-integration gitleaks dev-kek dev-up dev-down dev-destroy db-roles migrate
+PYTHON ?= ./.venv/Scripts/python.exe
+
+.PHONY: lint test test-integration gitleaks dev-kek dev-up dev-down dev-destroy db-roles migrate infisical-bootstrap
 
 lint:
 	uv run ruff check .
@@ -32,3 +34,6 @@ db-roles:
 
 migrate:
 	uv run alembic upgrade head
+
+infisical-bootstrap:
+	$(PYTHON) infra/infisical/bootstrap.py
