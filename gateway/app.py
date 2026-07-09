@@ -2,22 +2,35 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any, Protocol, cast
 
+from aiogram import Bot
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import PlainTextResponse
 from redis.asyncio import Redis
 
 from core.envelope import UpdateEnvelope
 from core.queue import QueueName, enqueue
-from gateway.config import GatewayConfig, config_from_env
+from core.rate_limit import (
+    DEFAULT_RATE_LIMIT_BURST,
+    DEFAULT_RATE_LIMIT_PER_MINUTE,
+    RedisEvalArg,
+    allow_user_update,
+)
+from core.telegram_sender import TelegramSender
+from gateway.config import GatewayConfig, config_from_env, optional_telegram_bot_token
 
 ALLOWED_UPDATES = ["message", "callback_query"]
 DEDUP_TTL_SECONDS = 86_400
+RATE_LIMIT_WARNING_TTL_SECONDS = 60
+RATE_LIMIT_WARNING_TEXT = (
+    "Слишком много сообщений — сделайте небольшую паузу, я отвечу на уже отправленные."
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +69,10 @@ class CacheRedis(Protocol):
         """Set a cache key."""
         ...
 
+    def eval(self, script: str, numkeys: int, *keys_and_args: RedisEvalArg) -> Awaitable[object]:
+        """Evaluate a Lua script."""
+        ...
+
 
 class ClosableRedis(Protocol):
     """Redis clients created by the app lifespan can be closed."""
@@ -68,6 +85,7 @@ class ClosableRedis(Protocol):
 # First parameter is the queue Redis client; typed as Any because redis-py's
 # own signatures are wider than any useful protocol here.
 EnqueueFunc = Callable[[Any, QueueName, UpdateEnvelope], Awaitable[str]]
+SendUserMessage = Callable[[int, str], Awaitable[None]]
 
 
 async def handle_update(
@@ -76,6 +94,9 @@ async def handle_update(
     queue_redis: QueueRedis,
     cache_redis: CacheRedis,
     enqueue_func: EnqueueFunc = enqueue,
+    send_user_message: SendUserMessage | None = None,
+    rate_limit_per_minute: int = DEFAULT_RATE_LIMIT_PER_MINUTE,
+    rate_limit_burst: int = DEFAULT_RATE_LIMIT_BURST,
 ) -> None:
     """Process a Telegram update through the shared webhook/polling path."""
 
@@ -88,7 +109,20 @@ async def handle_update(
         logger.debug("duplicate update ignored", extra={"update_id": envelope.update_id})
         return
 
-    # TODO(stage-2.7): enforce per-user token bucket rate limit before enqueue.
+    allowed = await allow_user_update(
+        cache_redis,
+        envelope.user_id,
+        per_minute=rate_limit_per_minute,
+        burst=rate_limit_burst,
+    )
+    if not allowed:
+        await _handle_rate_limited_update(
+            cache_redis,
+            envelope,
+            dedup_key=dedup_key,
+            send_user_message=send_user_message,
+        )
+        return
 
     await enqueue_func(queue_redis, "interactive", envelope)
     await cache_redis.set(dedup_key, "1", nx=True, ex=DEDUP_TTL_SECONDS)
@@ -100,17 +134,20 @@ def create_app(
     queue_redis: QueueRedis | None = None,
     cache_redis: CacheRedis | None = None,
     enqueue_func: EnqueueFunc = enqueue,
+    send_user_message: SendUserMessage | None = None,
 ) -> FastAPI:
     """Create the FastAPI gateway app."""
 
     gateway_config = config if config is not None else config_from_env()
     managed_clients: list[ClosableRedis] = []
+    managed_bots: list[Bot] = []
     runtime_queue_redis = queue_redis
     runtime_cache_redis = cache_redis
+    runtime_send_user_message = send_user_message
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        nonlocal runtime_queue_redis, runtime_cache_redis
+        nonlocal runtime_queue_redis, runtime_cache_redis, runtime_send_user_message
         if runtime_queue_redis is None:
             queue_client = Redis.from_url(gateway_config.redis.queue_url, decode_responses=True)
             runtime_queue_redis = cast(QueueRedis, queue_client)
@@ -119,11 +156,20 @@ def create_app(
             cache_client = Redis.from_url(gateway_config.redis.cache_url, decode_responses=True)
             runtime_cache_redis = cast(CacheRedis, cache_client)
             managed_clients.append(cast(ClosableRedis, cache_client))
+        if runtime_send_user_message is None:
+            token = optional_telegram_bot_token()
+            if token is not None:
+                bot = Bot(token)
+                sender = TelegramSender(bot, admin_chat_ids=gateway_config.admin_ids)
+                runtime_send_user_message = sender.send_message
+                managed_bots.append(bot)
         try:
             yield
         finally:
             for client in managed_clients:
                 await client.aclose()
+            for bot in managed_bots:
+                await bot.session.close()
 
     app = FastAPI(lifespan=lifespan)
 
@@ -162,6 +208,9 @@ def create_app(
             queue_redis=_queue_client(runtime_queue_redis),
             cache_redis=_cache_client(runtime_cache_redis),
             enqueue_func=enqueue_func,
+            send_user_message=runtime_send_user_message,
+            rate_limit_per_minute=gateway_config.rate_limit_per_minute,
+            rate_limit_burst=gateway_config.rate_limit_burst,
         )
         return {"ok": True}
 
@@ -178,6 +227,56 @@ def _cache_client(client: CacheRedis | None) -> CacheRedis:
     if client is None:
         raise RuntimeError("cache Redis client is not initialized.")
     return client
+
+
+async def _handle_rate_limited_update(
+    cache_redis: CacheRedis,
+    envelope: UpdateEnvelope,
+    *,
+    dedup_key: str,
+    send_user_message: SendUserMessage | None,
+) -> None:
+    warned_key = f"rl:warned:{envelope.user_id}"
+    should_warn = await cache_redis.set(
+        warned_key,
+        "1",
+        nx=True,
+        ex=RATE_LIMIT_WARNING_TTL_SECONDS,
+    )
+    if bool(should_warn):
+        if send_user_message is None:
+            logger.info(
+                "rate limit warning skipped because Telegram sender is unavailable",
+                extra={"update_id": envelope.update_id, "user_id": envelope.user_id},
+            )
+        else:
+            task = asyncio.create_task(
+                _send_user_message_safely(
+                    send_user_message,
+                    envelope.chat_id,
+                    RATE_LIMIT_WARNING_TEXT,
+                )
+            )
+            task.add_done_callback(_log_background_task_error)
+    await cache_redis.set(dedup_key, "1", nx=True, ex=DEDUP_TTL_SECONDS)
+
+
+async def _send_user_message_safely(
+    send_user_message: SendUserMessage,
+    chat_id: int,
+    text: str,
+) -> None:
+    try:
+        await send_user_message(chat_id, text)
+    except Exception:
+        logger.exception("failed to send rate limit warning", extra={"chat_id": chat_id})
+
+
+def _log_background_task_error(task: asyncio.Task[None]) -> None:
+    try:
+        task.result()
+    except Exception:
+        logger.exception("rate limit warning task failed")
 
 
 def _webhook_auth_ok(

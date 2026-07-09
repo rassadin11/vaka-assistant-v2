@@ -7,10 +7,13 @@ import logging
 import signal
 from typing import NoReturn
 
+from aiogram import Bot
 from redis.asyncio import Redis
 
+from core.config import admin_ids_from_env, optional_telegram_bot_token
 from core.queue import redis_settings_from_env
-from worker.app import Worker
+from core.telegram_sender import TelegramSender
+from worker.app import NotifyAdminCallback, SendReplyCallback, SendTypingCallback, Worker
 from worker.config import config_from_env
 from worker.processor import EchoProcessor
 
@@ -37,13 +40,28 @@ async def _run() -> None:
     config = config_from_env()
     queue_redis = Redis.from_url(settings.queue_url, decode_responses=True)
     cache_redis = Redis.from_url(settings.cache_url, decode_responses=True)
+    bot: Bot | None = None
+    token = optional_telegram_bot_token()
+    send_reply: SendReplyCallback
+    send_typing: SendTypingCallback
+    notify_admin: NotifyAdminCallback
+    if token is None:
+        send_reply = _log_reply
+        send_typing = _log_typing
+        notify_admin = _log_admin
+    else:
+        bot = Bot(token)
+        sender = TelegramSender(bot, admin_chat_ids=admin_ids_from_env())
+        send_reply = sender.send_message
+        send_typing = sender.send_typing
+        notify_admin = sender.notify_admins
     worker = Worker(
         queue_redis=queue_redis,
         cache_redis=cache_redis,
         processor=EchoProcessor(),
-        send_reply=_log_reply,
-        send_typing=_log_typing,
-        notify_admin=_log_admin,
+        send_reply=send_reply,
+        send_typing=send_typing,
+        notify_admin=notify_admin,
         config=config,
     )
     _install_signal_handlers(worker)
@@ -54,6 +72,8 @@ async def _run() -> None:
     finally:
         await queue_redis.aclose()
         await cache_redis.aclose()
+        if bot is not None:
+            await bot.session.close()
 
 
 def _install_signal_handlers(worker: Worker) -> None:

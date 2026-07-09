@@ -1,5 +1,6 @@
 """Unit tests for the gateway: filtering, dedup invariant, webhook auth, health."""
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -22,6 +23,8 @@ def _config() -> GatewayConfig:
         port=8000,
         public_url=None,
         admin_ids=(),
+        rate_limit_per_minute=20,
+        rate_limit_burst=5,
     )
 
 
@@ -36,9 +39,16 @@ class FakeQueueRedis:
 
 
 class FakeCacheRedis:
-    def __init__(self, *, existing: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        existing: set[str] | None = None,
+        rate_limit_results: list[bool] | None = None,
+    ) -> None:
         self.existing = existing if existing is not None else set()
+        self.rate_limit_results = rate_limit_results if rate_limit_results is not None else []
         self.set_calls: list[tuple[str, str, int | None, bool]] = []
+        self.eval_calls: list[tuple[str, int, tuple[object, ...]]] = []
 
     async def ping(self) -> object:
         return True
@@ -55,8 +65,16 @@ class FakeCacheRedis:
         nx: bool = False,
     ) -> object:
         self.set_calls.append((name, value, ex, nx))
+        if nx and name in self.existing:
+            return False
         self.existing.add(name)
         return True
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args: object) -> object:
+        self.eval_calls.append((script, numkeys, keys_and_args))
+        if self.rate_limit_results:
+            return [int(self.rate_limit_results.pop(0)), 0]
+        return [1, 0]
 
 
 class RecordingEnqueue:
@@ -74,6 +92,14 @@ class RecordingEnqueue:
             raise ConnectionError("enqueue failed")
         self.envelopes.append((queue, envelope))
         return "1-0"
+
+
+class RecordingUserSender:
+    def __init__(self) -> None:
+        self.messages: list[tuple[int, str]] = []
+
+    async def __call__(self, chat_id: int, text: str) -> None:
+        self.messages.append((chat_id, text))
 
 
 def _text_update(update_id: int = 1, chat_type: str = "private") -> dict[str, Any]:
@@ -119,6 +145,86 @@ async def test_dedup_key_not_set_when_enqueue_fails() -> None:
             enqueue_func=enqueue,
         )
     assert cache.set_calls == []
+
+
+async def test_rate_limited_update_is_dropped_warned_and_deduped() -> None:
+    enqueue = RecordingEnqueue()
+    cache = FakeCacheRedis(rate_limit_results=[False])
+    sender = RecordingUserSender()
+
+    await handle_update(
+        _text_update(update_id=20),
+        queue_redis=FakeQueueRedis(),
+        cache_redis=cache,
+        enqueue_func=enqueue,
+        send_user_message=sender,
+    )
+    await asyncio.sleep(0)
+
+    assert enqueue.envelopes == []
+    assert sender.messages == [
+        (
+            42,
+            "Слишком много сообщений — сделайте небольшую паузу, я отвечу на уже отправленные.",
+        )
+    ]
+    assert cache.set_calls == [
+        ("rl:warned:42", "1", 60, True),
+        ("dedup:20", "1", 86_400, True),
+    ]
+
+
+async def test_rate_limited_update_is_silent_when_warning_flag_exists() -> None:
+    enqueue = RecordingEnqueue()
+    cache = FakeCacheRedis(existing={"rl:warned:42"}, rate_limit_results=[False])
+    sender = RecordingUserSender()
+
+    await handle_update(
+        _text_update(update_id=21),
+        queue_redis=FakeQueueRedis(),
+        cache_redis=cache,
+        enqueue_func=enqueue,
+        send_user_message=sender,
+    )
+    await asyncio.sleep(0)
+
+    assert enqueue.envelopes == []
+    assert sender.messages == []
+    assert cache.set_calls == [
+        ("rl:warned:42", "1", 60, True),
+        ("dedup:21", "1", 86_400, True),
+    ]
+
+
+async def test_callback_update_counts_against_rate_limit() -> None:
+    enqueue = RecordingEnqueue()
+    cache = FakeCacheRedis(rate_limit_results=[False])
+    sender = RecordingUserSender()
+    update = {
+        "update_id": 22,
+        "callback_query": {
+            "id": "cb1",
+            "from": {"id": 42, "is_bot": False, "first_name": "T"},
+            "data": "tz:Europe/Moscow",
+            "message": {
+                "message_id": 11,
+                "chat": {"id": 42, "type": "private"},
+                "date": 1783000000,
+            },
+        },
+    }
+
+    await handle_update(
+        update,
+        queue_redis=FakeQueueRedis(),
+        cache_redis=cache,
+        enqueue_func=enqueue,
+        send_user_message=sender,
+    )
+    await asyncio.sleep(0)
+
+    assert enqueue.envelopes == []
+    assert sender.messages
 
 
 async def test_duplicate_update_skipped() -> None:

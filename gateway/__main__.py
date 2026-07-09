@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 from typing import NoReturn
@@ -12,8 +13,9 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import Update
 from redis.asyncio import Redis
 
+from core.telegram_sender import TelegramSender
 from gateway.app import ALLOWED_UPDATES, handle_update
-from gateway.config import config_from_env, telegram_bot_token
+from gateway.config import config_from_env, optional_telegram_bot_token, telegram_bot_token
 
 
 def main() -> NoReturn:
@@ -35,7 +37,13 @@ def main() -> NoReturn:
 
 async def _run_polling() -> None:
     config = config_from_env()
-    bot = Bot(telegram_bot_token())
+    token = optional_telegram_bot_token()
+    if token is None:
+        logging.getLogger(__name__).warning("TELEGRAM_BOT_TOKEN is not configured; polling exits")
+        return
+
+    bot = Bot(token)
+    sender = TelegramSender(bot, admin_chat_ids=config.admin_ids)
     dispatcher = Dispatcher()
     queue_redis = Redis.from_url(config.redis.queue_url, decode_responses=True)
     cache_redis = Redis.from_url(config.redis.cache_url, decode_responses=True)
@@ -45,6 +53,9 @@ async def _run_polling() -> None:
             update.model_dump(mode="json", exclude_none=True),
             queue_redis=queue_redis,
             cache_redis=cache_redis,
+            send_user_message=sender.send_message,
+            rate_limit_per_minute=config.rate_limit_per_minute,
+            rate_limit_burst=config.rate_limit_burst,
         )
 
     dispatcher.update.register(on_update)
