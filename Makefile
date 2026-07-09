@@ -1,4 +1,4 @@
-.PHONY: lint test test-integration gitleaks dev-up dev-down dev-destroy db-roles migrate
+.PHONY: lint test test-integration gitleaks dev-kek dev-up dev-down dev-destroy db-roles migrate
 
 lint:
 	uv run ruff check .
@@ -14,6 +14,9 @@ test-integration:
 # Local secret scan via docker (CI uses gitleaks-action)
 gitleaks:
 	docker run --rm -v "$(CURDIR):/repo" ghcr.io/gitleaks/gitleaks:latest detect --source /repo --no-banner
+
+dev-kek:
+	python -c "from core.crypto import generate_base64_kek; print(generate_base64_kek())"
 
 dev-up:
 	docker compose -f infra/docker-compose.dev.yml up -d --wait
