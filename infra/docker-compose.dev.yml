@@ -9,11 +9,18 @@ services:
       POSTGRES_USER: assistant
       POSTGRES_PASSWORD: dev-local-only
       POSTGRES_DB: assistant
+      PGBACKREST_REPO1_CIPHER_PASS: ${PGBACKREST_REPO1_CIPHER_PASS:-dev-only-pgbackrest-cipher-passphrase}
+      PGBACKREST_REPO2_CIPHER_PASS: ${PGBACKREST_REPO2_CIPHER_PASS:-dev-only-pgbackrest-weekly-cipher-passphrase}
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.dev.conf"]
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - pgbackrest_repo:/var/lib/pgbackrest
+      - pgbackrest_spool:/var/spool/pgbackrest
       - ./postgres/init-roles.sql:/docker-entrypoint-initdb.d/10-init-roles.sql:ro
+      - ./postgres/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
+      - ./postgres/postgresql.dev.conf:/etc/postgresql/postgresql.dev.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U assistant -d assistant"]
       interval: 5s
@@ -75,6 +82,7 @@ services:
       POSTGRES_DB: infisical
     volumes:
       - infisical_postgres_data:/var/lib/postgresql/data
+      - infisical_backups:/backups
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U infisical -d infisical"]
       interval: 5s
@@ -131,8 +139,40 @@ services:
       retries: 30
       start_period: 60s
 
+  postgres-restore:
+    profiles: ["restore"]
+    build:
+      context: ./postgres
+    image: personal-assistant-postgres:pg16-partman
+    environment:
+      POSTGRES_USER: assistant
+      POSTGRES_PASSWORD: dev-local-only
+      POSTGRES_DB: assistant
+      PGBACKREST_REPO1_CIPHER_PASS: ${PGBACKREST_REPO1_CIPHER_PASS:-dev-only-pgbackrest-cipher-passphrase}
+      PGBACKREST_REPO2_CIPHER_PASS: ${PGBACKREST_REPO2_CIPHER_PASS:-dev-only-pgbackrest-weekly-cipher-passphrase}
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.restore.conf"]
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_restore_data:/var/lib/postgresql/data
+      - pgbackrest_repo:/var/lib/pgbackrest:ro
+      - pgbackrest_spool_restore:/var/spool/pgbackrest
+      - ./postgres/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
+      - ./postgres/postgresql.restore.conf:/etc/postgresql/postgresql.restore.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assistant -d assistant"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
 volumes:
   postgres_data:
+  postgres_restore_data:
+  pgbackrest_repo:
+  pgbackrest_spool:
+  pgbackrest_spool_restore:
   redis_queue_data:
   infisical_postgres_data:
+  infisical_backups:
   infisical_redis_data:

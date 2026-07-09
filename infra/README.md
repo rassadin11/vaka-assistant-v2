@@ -111,3 +111,88 @@ make migrate
 
 URL можно переопределить через `MIGRATIONS_DATABASE_URL`; значение по умолчанию —
 `postgresql+psycopg://migrator:dev-local-only@127.0.0.1:5432/assistant`.
+
+## Локальные бэкапы и restore-to-dev
+
+Основная БД использует pgBackRest со stanza `assistant`. Репозиторий хранится в Docker
+volume `pgbackrest_repo`, WAL архивируется через `archive_mode=on` и
+`archive_command='pgbackrest --stanza=assistant archive-push %p'`. Внутри volume есть два
+локальных repo: `repo1` для ежедневных full-бэкапов и `repo2` для еженедельных full-бэкапов.
+Оба repo зашифрованы `aes-256-cbc`; passphrase берется из `PGBACKREST_REPO1_CIPHER_PASS`
+и `PGBACKREST_REPO2_CIPHER_PASS`, а для dev есть явные небезопасные defaults
+`dev-only-pgbackrest-cipher-passphrase` и
+`dev-only-pgbackrest-weekly-cipher-passphrase`. Не используйте их в production.
+
+Retention в dev-конфиге: для daily repo `repo1-retention-full=7`,
+`repo1-retention-full-type=count`; для weekly repo `repo2-retention-full=4`,
+`repo2-retention-full-type=count`. WAL retention в обоих repo привязан к full-бэкапам
+через `repoN-retention-archive-type=full`. Это локальный механизм для stage 1A;
+S3/offsite настройки относятся к stage 1B.
+
+Снять full-бэкап основной БД:
+
+```bash
+make backup
+```
+
+Команда создает stanza, если его еще нет, затем запускает full backup внутри контейнера
+`postgres` в daily repo (`repo1`). Еженедельный full-бэкап в repo с retention 4 запускается
+отдельно:
+
+```bash
+make backup-weekly
+```
+
+Проверить WAL archive и состояние репозитория:
+
+```bash
+make backup-check
+```
+
+Восстановить последний pgBackRest-бэкап в отдельный одноразовый Postgres:
+
+```bash
+make restore-to-dev
+```
+
+Скрипт `infra/restore-to-dev.sh` очищает только отдельный volume `postgres_restore_data`,
+восстанавливает туда последний backup и поднимает сервис `postgres-restore` из compose
+profile `restore` на `localhost:5433`. Основной volume `postgres_data` этим скриптом не
+монтируется на запись и не изменяется.
+
+После восстановления скрипт выполняет sanity query: считает таблицы в `public`, а если
+таблица `users` существует, считает строки в ней. Для проверки конкретной marker-строки
+можно передать Telegram user id:
+
+```bash
+RESTORE_MARKER_TG_USER_ID=900000001 make restore-to-dev
+```
+
+На Windows запускайте restore через Git Bash или другую bash-совместимую оболочку.
+Make target вызывает `bash infra/restore-to-dev.sh`, поэтому `bash` должен быть доступен
+в `PATH`. Восстановленный контейнер остается запущенным на `:5433`, чтобы можно было
+проверить данные вручную:
+
+```bash
+psql "postgresql://assistant:dev-local-only@localhost:5433/assistant"
+```
+
+Останавливать restore-контейнер только адресно:
+
+```bash
+docker compose -f infra/docker-compose.dev.yml stop postgres-restore
+docker compose -f infra/docker-compose.dev.yml rm -f postgres-restore
+```
+
+Внимание: `docker compose --profile restore down` останавливает ВЕСЬ dev-стек
+(профиль лишь добавляет сервис к списку), не используйте его для остановки
+одного restore-контейнера.
+
+Дамп БД Infisical сохраняется отдельно в Docker volume `infisical_backups`:
+
+```bash
+make backup-infisical
+```
+
+Файл создается внутри контейнера `infisical-db` в `/backups` в формате custom pg_dump:
+`infisical-YYYYMMDDTHHMMSSZ.dump`.
