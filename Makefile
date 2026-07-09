@@ -1,4 +1,4 @@
-.PHONY: lint test gitleaks dev-up dev-down dev-destroy
+.PHONY: lint test test-integration gitleaks dev-up dev-down dev-destroy db-roles
 
 lint:
 	uv run ruff check .
@@ -7,6 +7,9 @@ lint:
 
 test:
 	uv run pytest -v
+
+test-integration:
+	uv run pytest -v -m integration
 
 # Local secret scan via docker (CI uses gitleaks-action)
 gitleaks:
@@ -20,3 +23,6 @@ dev-down:
 
 dev-destroy:
 	docker compose -f infra/docker-compose.dev.yml down -v
+
+db-roles:
+	docker compose -f infra/docker-compose.dev.yml exec -T postgres psql -U assistant -d assistant -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/10-init-roles.sql

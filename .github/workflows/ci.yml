@@ -27,6 +27,19 @@ jobs:
       - run: uv sync --dev
       - run: uv run pytest -v
 
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --dev
+      - run: docker compose -f infra/docker-compose.dev.yml up -d --wait
+      - run: uv run pytest -v -m integration
+      - if: always()
+        run: docker compose -f infra/docker-compose.dev.yml down -v
+
   gitleaks:
     runs-on: ubuntu-latest
     steps:

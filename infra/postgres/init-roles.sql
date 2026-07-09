@@ -1,0 +1,73 @@
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'migrator') THEN
+        CREATE ROLE migrator
+            LOGIN
+            PASSWORD 'dev-local-only'
+            NOSUPERUSER
+            NOCREATEDB
+            NOCREATEROLE
+            NOINHERIT
+            NOBYPASSRLS;
+    ELSE
+        ALTER ROLE migrator
+            WITH LOGIN
+            PASSWORD 'dev-local-only'
+            NOSUPERUSER
+            NOCREATEDB
+            NOCREATEROLE
+            NOINHERIT
+            NOBYPASSRLS;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app') THEN
+        CREATE ROLE app
+            LOGIN
+            PASSWORD 'dev-local-only'
+            NOSUPERUSER
+            NOCREATEDB
+            NOCREATEROLE
+            NOINHERIT
+            NOBYPASSRLS;
+    ELSE
+        ALTER ROLE app
+            WITH LOGIN
+            PASSWORD 'dev-local-only'
+            NOSUPERUSER
+            NOCREATEDB
+            NOCREATEROLE
+            NOINHERIT
+            NOBYPASSRLS;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service') THEN
+        CREATE ROLE service
+            LOGIN
+            PASSWORD 'dev-local-only'
+            NOSUPERUSER
+            NOCREATEDB
+            NOCREATEROLE
+            NOINHERIT
+            BYPASSRLS;
+    ELSE
+        ALTER ROLE service
+            WITH LOGIN
+            PASSWORD 'dev-local-only'
+            NOSUPERUSER
+            NOCREATEDB
+            NOCREATEROLE
+            NOINHERIT
+            BYPASSRLS;
+    END IF;
+END
+$$;
+
+GRANT CONNECT ON DATABASE assistant TO migrator, app, service;
+
+GRANT USAGE, CREATE ON SCHEMA public TO migrator;
+GRANT USAGE ON SCHEMA public TO app, service;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE migrator IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app, service;
+ALTER DEFAULT PRIVILEGES FOR ROLE migrator IN SCHEMA public
+    GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO app, service;

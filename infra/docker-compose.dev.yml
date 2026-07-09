@@ -11,6 +11,7 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init-roles.sql:/docker-entrypoint-initdb.d/10-init-roles.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U assistant -d assistant"]
       interval: 5s

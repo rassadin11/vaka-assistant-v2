@@ -1,1 +1,4 @@
 "assistant" "dev-local-only"
+"migrator" "dev-local-only"
+"app" "dev-local-only"
+"service" "dev-local-only"
