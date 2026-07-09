@@ -3,9 +3,9 @@
 Правила: отмечать пункт только после полной приёмки (тесты + e2e + gitleaks); в скобках — дата и ссылка на коммит/PR, если есть. Блокеры — в раздел внизу. Формулировки пунктов — короткие ярлыки, содержание всегда в plan/stage-N.md.
 
 ## Этап 0. Подготовка
-- [ ] 0.1 Документ требований
-- [ ] 0.2 Репозиторий (monorepo, pre-commit, pytest)
-- [ ] 0.3 CI
+- [x] 0.1 Документ требований (2026-07-09, plan/requirements.md)
+- [x] 0.2 Репозиторий (monorepo, pre-commit, pytest) (2026-07-09, initial commit: uv, ruff, mypy strict, pytest, pre-commit hooks установлены, Dockerfile собирается)
+- [ ] 0.3 CI — workflow готов (.github/workflows/ci.yml: lint, test, gitleaks, build); приёмка после первого зелёного прогона на GitHub (см. блокер)
 - [ ] 0.4 Окружения dev/prod
 - [ ] 0.5 Регистрации (BotFather, OpenRouter, Google Cloud + заявка, домен, Tribute)
 - [ ] 0.6 Privacy policy опубликована; черновик оферты
@@ -96,4 +96,6 @@
 - [ ] После этапа 4
 
 ## Блокеры
-(пусто)
+- 0.3: нужен GitHub-репозиторий (создать + запушить; gh CLI на машине нет). После первого зелёного прогона Actions отметить 0.3.
+- 0.5: регистрации выполняет владелец: BotFather (тест+бой), OpenRouter (ключ + лимиты расходов), Google Cloud проект + consent screen, домен, Tribute (можно к этапу 7).
+- 0.6/№10: privacy policy публикуется после выбора домена; заявка в Google — после публикации.
