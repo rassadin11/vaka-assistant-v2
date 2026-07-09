@@ -1,4 +1,4 @@
-.PHONY: lint test gitleaks dev-up
+.PHONY: lint test gitleaks dev-up dev-down dev-destroy
 
 lint:
 	uv run ruff check .
@@ -12,6 +12,11 @@ test:
 gitleaks:
 	docker run --rm -v "$(CURDIR):/repo" ghcr.io/gitleaks/gitleaks:latest detect --source /repo --no-banner
 
-# Полное dev-окружение появляется на этапе 1.1 (plan/stage-1.md)
 dev-up:
-	@echo "dev-up: docker-compose окружение реализуется в 1.1 (plan/stage-1.md)"
+	docker compose -f infra/docker-compose.dev.yml up -d --wait
+
+dev-down:
+	docker compose -f infra/docker-compose.dev.yml down
+
+dev-destroy:
+	docker compose -f infra/docker-compose.dev.yml down -v

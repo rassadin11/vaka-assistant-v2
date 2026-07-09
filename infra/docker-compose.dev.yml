@@ -1,0 +1,135 @@
+name: personal-assistant-dev
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: assistant
+      POSTGRES_PASSWORD: dev-local-only
+      POSTGRES_DB: assistant
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assistant -d assistant"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.2-p0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "6432:6432"
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U assistant -d assistant"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  redis-queue:
+    image: redis:7.4.5-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./redis/redis-queue.conf:/usr/local/etc/redis/redis.conf:ro
+      - redis_queue_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  redis-cache:
+    image: redis:7.4.5-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - ./redis/redis-cache.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  infisical-db:
+    image: postgres:16.10-alpine
+    environment:
+      POSTGRES_USER: infisical
+      POSTGRES_PASSWORD: infisical-dev-local-only
+      POSTGRES_DB: infisical
+    volumes:
+      - infisical_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U infisical -d infisical"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  infisical-redis:
+    image: redis:7.4.5-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - infisical_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  infisical:
+    image: infisical/infisical:v0.161.12
+    depends_on:
+      infisical-db:
+        condition: service_healthy
+      infisical-redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      ENCRYPTION_KEY: dev-local-only-infisical-key-000
+      AUTH_SECRET: dev-local-only-infisical-auth-secret-not-production
+      POSTGRES_USER: infisical
+      POSTGRES_PASSWORD: infisical-dev-local-only
+      POSTGRES_DB: infisical
+      DB_CONNECTION_URI: postgres://infisical:infisical-dev-local-only@infisical-db:5432/infisical
+      REDIS_URL: redis://infisical-redis:6379
+      SITE_URL: http://localhost:8880
+      TELEMETRY_ENABLED: "false"
+      OTEL_TELEMETRY_COLLECTION_ENABLED: "false"
+    ports:
+      - "8880:8080"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:8080/api/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+volumes:
+  postgres_data:
+  redis_queue_data:
+  infisical_postgres_data:
+  infisical_redis_data:
