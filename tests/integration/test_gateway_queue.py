@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 import pytest
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from core.envelope import UpdateEnvelope
 from core.queue import (
@@ -30,7 +31,7 @@ async def _redis_or_skip(url: str) -> Redis:
     client: Redis = Redis.from_url(url, decode_responses=True)
     try:
         await client.ping()
-    except (OSError, ConnectionError) as exc:
+    except (OSError, RedisError) as exc:
         await client.aclose()
         pytest.skip(f"local dev redis is not reachable: {exc}")
     return client
