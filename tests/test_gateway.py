@@ -288,7 +288,11 @@ async def test_callback_update_mapped() -> None:
     assert len(enqueue.envelopes) == 1
     _, envelope = enqueue.envelopes[0]
     assert envelope.kind == "callback"
-    assert envelope.payload == {"data": "tz:Europe/Moscow", "message_id": 11}
+    assert envelope.payload == {
+        "data": "tz:Europe/Moscow",
+        "message_id": 11,
+        "callback_query_id": "cb1",
+    }
 
 
 def _client(

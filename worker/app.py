@@ -127,10 +127,15 @@ class Worker:
         if reclaimed:
             return True
 
-        message = await self._read_next_message()
-        if message is None:
+        messages = await self._read_next_messages()
+        if not messages:
             return False
-        await self._handle_message(message)
+        # XREADGROUP returns up to `count` entries PER stream, so one read over
+        # 16 partitions can deliver several messages; every delivered entry must
+        # be handled, or it silently waits for the 210s reclaim and its delivery
+        # counter drifts toward the DLQ.
+        for message in messages:
+            await self._handle_message(message)
         return True
 
     async def _reclaim_if_due(self) -> bool:
@@ -159,16 +164,16 @@ class Worker:
                 handled = True
         return handled
 
-    async def _read_next_message(self) -> QueueMessage | None:
+    async def _read_next_messages(self) -> list[QueueMessage]:
         if self._config.interactive_only:
             return await self._read_queue("interactive", block_ms=self._config.interactive_block_ms)
 
         interactive = await self._read_queue("interactive", block_ms=None)
-        if interactive is not None:
+        if interactive:
             return interactive
         return await self._read_queue("background", block_ms=self._config.background_block_ms)
 
-    async def _read_queue(self, queue: QueueName, *, block_ms: int | None) -> QueueMessage | None:
+    async def _read_queue(self, queue: QueueName, *, block_ms: int | None) -> list[QueueMessage]:
         response = await read_group(
             self._queue_redis,
             queue,
@@ -176,10 +181,7 @@ class Worker:
             count=1,
             block_ms=block_ms,
         )
-        messages = decode_read_group_response(response, queue)
-        if not messages:
-            return None
-        return messages[0]
+        return decode_read_group_response(response, queue)
 
     async def _handle_message(self, message: QueueMessage) -> None:
         envelope = message.envelope

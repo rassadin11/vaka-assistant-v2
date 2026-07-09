@@ -315,6 +315,26 @@ async def test_lock_contention_leaves_message_pending_without_ack() -> None:
     assert queue_redis.acked == []
 
 
+async def test_multi_partition_read_processes_every_delivered_message() -> None:
+    queue_redis = FakeQueueRedis()
+    first = _envelope(update_id=301, user_id=42, chat_id=42)
+    second = _envelope(update_id=302, user_id=43, chat_id=43)
+    queue_redis.read_responses["interactive"].append(
+        [
+            [stream_key("interactive", 0), [("1-0", first.to_stream_entry())]],
+            [stream_key("interactive", 5), [("2-0", second.to_stream_entry())]],
+        ]
+    )
+    processor = RecordingProcessor()
+    worker, callbacks = _worker(queue_redis, FakeCacheRedis(), processor=processor)
+
+    assert await worker.run_once()
+
+    assert [envelope.update_id for envelope in processor.envelopes] == [301, 302]
+    assert callbacks.replies == [(42, "hello"), (43, "hello")]
+    assert {entry_id for _, _, entry_id in queue_redis.acked} == {"1-0", "2-0"}
+
+
 async def test_reclaim_processes_every_claimed_message() -> None:
     queue_redis = FakeQueueRedis()
     stream = stream_key("interactive", 0)

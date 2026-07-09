@@ -391,8 +391,15 @@ def _callback_envelope(
     user_id = _int_field(user, "id")
     chat_id = _int_field(chat, "id")
     message_id = _int_field(message, "message_id")
+    callback_query_id = callback_query.get("id")
     data = callback_query.get("data")
-    if user_id is None or chat_id is None or message_id is None or not isinstance(data, str):
+    if (
+        user_id is None
+        or chat_id is None
+        or message_id is None
+        or not isinstance(callback_query_id, str)
+        or not isinstance(data, str)
+    ):
         logger.debug("callback without required fields ignored", extra={"update_id": update_id})
         return None
 
@@ -401,7 +408,7 @@ def _callback_envelope(
         user_id=user_id,
         chat_id=chat_id,
         kind="callback",
-        payload={"data": data, "message_id": message_id},
+        payload={"data": data, "message_id": message_id, "callback_query_id": callback_query_id},
     )
 
 

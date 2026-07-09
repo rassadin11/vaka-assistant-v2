@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Protocol
 
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
+from aiogram.types import ForceReply, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 MAX_TELEGRAM_MESSAGE_CHARS = 4096
 
@@ -16,17 +17,28 @@ LOGGER = logging.getLogger(__name__)
 
 Clock = Callable[[], float]
 Sleep = Callable[[float], Awaitable[None]]
+TelegramReplyMarkup = ForceReply | InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove
 
 
 class TelegramBot(Protocol):
     """Duck-typed subset of aiogram Bot used by the sender."""
 
-    def send_message(self, chat_id: int, text: str) -> Awaitable[object]:
+    def send_message(
+        self,
+        chat_id: int | str,
+        text: str,
+        *,
+        reply_markup: TelegramReplyMarkup | None = None,
+    ) -> Awaitable[object]:
         """Send a text message."""
         ...
 
     def send_chat_action(self, chat_id: int, action: str) -> Awaitable[object]:
         """Send a chat action."""
+        ...
+
+    def answer_callback_query(self, callback_query_id: str) -> Awaitable[object]:
+        """Answer a callback query."""
         ...
 
 
@@ -92,11 +104,27 @@ class TelegramSender:
         self._max_retries = max_retries
         self._logger = logger if logger is not None else LOGGER
 
-    async def send_message(self, chat_id: int, text: str) -> None:
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: TelegramReplyMarkup | None = None,
+    ) -> None:
         """Send a text message, splitting long text into Telegram-sized chunks."""
 
-        for chunk in split_telegram_text(text):
-            await self._send_message_chunk(chat_id, chunk)
+        chunks = split_telegram_text(text)
+        for index, chunk in enumerate(chunks):
+            chunk_markup = reply_markup if index == len(chunks) - 1 else None
+            await self._send_message_chunk(chat_id, chunk, reply_markup=chunk_markup)
+
+    async def answer_callback_query(self, callback_query_id: str) -> None:
+        """Answer a Telegram callback query without retrying API failures."""
+
+        await self._limiter.wait(apply_per_chat=False)
+        try:
+            await self._bot.answer_callback_query(callback_query_id=callback_query_id)
+        except TelegramAPIError as exc:
+            self._logger.warning("telegram callback answer failed: %s", exc)
 
     async def send_typing(self, chat_id: int) -> None:
         """Send a typing action, paced globally but not by the per-chat message limit."""
@@ -116,12 +144,22 @@ class TelegramSender:
             except TelegramAPIError as exc:
                 self._logger.warning("telegram admin notification failed: %s", exc)
 
-    async def _send_message_chunk(self, chat_id: int, text: str) -> None:
+    async def _send_message_chunk(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        reply_markup: TelegramReplyMarkup | None = None,
+    ) -> None:
         retries = 0
         while True:
             await self._limiter.wait(chat_id=chat_id, apply_per_chat=True)
             try:
-                await self._bot.send_message(chat_id=chat_id, text=text)
+                await self._bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                )
                 return
             except TelegramRetryAfter as exc:
                 retries += 1
