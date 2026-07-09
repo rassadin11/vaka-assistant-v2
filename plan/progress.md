@@ -17,7 +17,7 @@
 - [x] 1.4 Два Redis (2026-07-09, в составе 1.1: noeviction+AOF / allkeys-lru без персистентности, проверено config get)
 - [ ] 1.5 Infisical + machine identities
 - [x] 1.6 Миграция v1 (13 таблиц по db-schema.md) (2026-07-09, Codex + opus-ревью против спеки + приёмка Claude; уточнения спеки: RLS-шаблон fail-closed, user_id NOT NULL; commit 7875092)
-- [ ] 1.7 Envelope-шифрование oauth_tokens
+- [x] 1.7 Envelope-шифрование oauth_tokens (2026-07-09, core/crypto.py: AES-256-GCM, версионируемый KEK, key_version в AAD; Codex + приёмка Claude; commit 46d4360)
 - [ ] 1.8 Бэкапы + restore-to-dev.sh
 
 ## Этап 1B. Боевой сервер (к закрытой бете)
