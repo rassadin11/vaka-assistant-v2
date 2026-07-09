@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from core.context import TaskContext
 from core.envelope import UpdateEnvelope
 
 
@@ -14,12 +15,20 @@ class Processor(Protocol):
         """Process an update envelope."""
 
 
+class ContextualProcessor(Protocol):
+    """Inner processor that receives the onboarding-resolved task context."""
+
+    async def process(self, envelope: UpdateEnvelope, context: TaskContext) -> str | None:
+        """Process one active-user update."""
+
+
 class EchoProcessor:
     """Temporary processor that echoes text payloads back to the user."""
 
-    async def process(self, envelope: UpdateEnvelope) -> str | None:
+    async def process(self, envelope: UpdateEnvelope, context: TaskContext) -> str | None:
         """Return the text payload for text messages, otherwise no reply."""
 
+        del context
         text = envelope.payload.get("text")
         if isinstance(text, str):
             return text

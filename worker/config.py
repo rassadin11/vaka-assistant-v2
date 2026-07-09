@@ -17,6 +17,7 @@ def config_from_env() -> WorkerConfig:
         reclaim_min_idle_ms=int(os.getenv("WORKER_RECLAIM_MIN_IDLE_MS", "210000")),
         max_deliveries=int(os.getenv("WORKER_MAX_DELIVERIES", "3")),
         lock_ttl_ms=int(os.getenv("WORKER_LOCK_TTL_MS", "180000")),
+        lock_extend_interval_seconds=float(os.getenv("WORKER_LOCK_EXTEND_INTERVAL_SECONDS", "60")),
         process_timeout_seconds=float(os.getenv("WORKER_PROCESS_TIMEOUT_SECONDS", "120")),
     )
 

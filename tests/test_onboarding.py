@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+from core.context import TaskContext
 from core.envelope import UpdateEnvelope
 from worker.onboarding import (
     ADMIN_NEW_APPLICATION_TEXT,
@@ -115,6 +116,7 @@ class FakeConnection:
         if row is None:
             return None
         return {
+            "id": row["id"],
             "tg_user_id": row["tg_user_id"],
             "tg_chat_id": row["tg_chat_id"],
             "status": row["status"],
@@ -205,6 +207,16 @@ class Recorder:
 
     async def notify_admin(self, text: str) -> None:
         self.admin.append(text)
+
+
+class ContextRecorder:
+    def __init__(self) -> None:
+        self.context: TaskContext | None = None
+
+    async def process(self, envelope: UpdateEnvelope, context: TaskContext) -> str | None:
+        del envelope
+        self.context = context
+        return "received"
 
 
 def _processor(
@@ -346,3 +358,30 @@ async def test_active_help_start_and_passthrough_to_inner_echo() -> None:
     assert await processor.process(_envelope(tg_user_id=101, text="/help")) == HELP_TEXT
     assert await processor.process(_envelope(tg_user_id=101, text="/start")) == ALREADY_ACTIVE_TEXT
     assert await processor.process(_envelope(tg_user_id=101, text="echo")) == "echo"
+
+
+async def test_active_user_context_uses_the_already_resolved_user_row() -> None:
+    pool = FakePool()
+    cache = FakeCache()
+    recorder = Recorder()
+    inner = ContextRecorder()
+    processor = OnboardingProcessor(
+        service_pool=pool,  # type: ignore[arg-type]
+        cache_redis=cache,
+        inner=inner,
+        send=recorder.send,
+        answer_callback=recorder.answer_callback,
+        notify_admin=recorder.notify_admin,
+        admin_ids=(900,),
+    )
+    pool.add_user(101, tg_chat_id=501, status="active", timezone="Asia/Almaty")
+    envelope = _envelope(tg_user_id=101, chat_id=999, text="hello")
+
+    assert await processor.process(envelope) == "received"
+    assert inner.context == TaskContext(
+        user_id=pool.users[101]["id"],
+        tg_user_id=101,
+        chat_id=501,
+        timezone="Asia/Almaty",
+        trace_id=envelope.trace_id,
+    )

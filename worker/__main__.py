@@ -22,11 +22,17 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from redis.asyncio import Redis
 
+from core.agent import AgentLoop, AgentLoopConfig
 from core.config import admin_ids_from_env, optional_telegram_bot_token
 from core.db import create_service_pool
 from core.envelope import UpdateEnvelope
+from core.llm_openrouter import OpenRouterProvider
 from core.queue import redis_settings_from_env
+from core.secrets import EnvSecretsProvider, SecretNotFoundError
 from core.telegram_sender import TelegramSender
+from core.tools_dispatch import StaticToolDispatcher
+from tools.clock import GET_CURRENT_TIME_DEFINITION, get_current_time
+from worker.agent_processor import AgentProcessor
 from worker.app import NotifyAdminCallback, SendReplyCallback, SendTypingCallback, Worker
 from worker.config import config_from_env
 from worker.onboarding import (
@@ -101,13 +107,15 @@ async def _run() -> None:
     processor: Processor
     if plain_echo:
         processor = TestableEchoProcessor()
+        logging.getLogger(__name__).info("inner processor active: plain echo")
     else:
         if service_pool is None:
             raise RuntimeError("service pool is required outside WORKER_PLAIN_ECHO mode")
+        inner = _active_inner_processor(send_reply)
         processor = OnboardingProcessor(
             service_pool=service_pool,
             cache_redis=cache_redis,
-            inner=EchoProcessor(),
+            inner=inner,
             send=rich_send,
             answer_callback=answer_callback,
             notify_admin=cast(OnboardingNotifyAdmin, notify_admin),
@@ -228,6 +236,29 @@ def _env_bool(name: str) -> bool:
     if raw_value is None:
         return False
     return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _active_inner_processor(send_reply: SendReplyCallback) -> AgentProcessor | EchoProcessor:
+    """Choose the production agent only when its API key can be resolved."""
+
+    try:
+        api_key = EnvSecretsProvider().get("OPENROUTER_API_KEY")
+    except SecretNotFoundError:
+        logging.getLogger(__name__).info("inner processor active: echo (no OpenRouter key)")
+        return EchoProcessor()
+    if not api_key.strip():
+        logging.getLogger(__name__).info("inner processor active: echo (empty OpenRouter key)")
+        return EchoProcessor()
+
+    dispatcher = StaticToolDispatcher(
+        [GET_CURRENT_TIME_DEFINITION],
+        {"get_current_time": get_current_time},
+    )
+    logging.getLogger(__name__).info("inner processor active: agent")
+    return AgentProcessor(
+        AgentLoop(OpenRouterProvider(), dispatcher, AgentLoopConfig.from_env()),
+        send=send_reply,
+    )
 
 
 class TestableEchoProcessor:

@@ -43,6 +43,7 @@ class FakeQueueRedis:
         self.autoclaim_responses: dict[str, list[tuple[str, dict[str, str]]]] = {}
         self.pending_range_responses: dict[tuple[str, str], list[list[dict[str, object]]]] = {}
         self.stream_entries: dict[tuple[str, str], dict[str, str]] = {}
+        self.eval_calls: list[str] = []
 
     async def set(
         self,
@@ -60,6 +61,7 @@ class FakeQueueRedis:
 
     async def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> int:
         del numkeys
+        self.eval_calls.append(script)
         key = str(keys_and_args[0])
         token = str(keys_and_args[1])
         if self.values.get(key) != token:
@@ -153,6 +155,9 @@ class FakeCacheRedis:
     def __init__(self, *, existing: set[str] | None = None) -> None:
         self.existing = existing if existing is not None else set()
         self.set_calls: list[tuple[str, str, int | None, bool]] = []
+        self.values: dict[str, int] = {}
+        self.expire_calls: list[tuple[str, int]] = []
+        self.deleted: list[str] = []
 
     def exists(self, name: str) -> Awaitable[int]:
         async def _exists() -> int:
@@ -177,6 +182,35 @@ class FakeCacheRedis:
 
         return _set()
 
+    def incr(self, name: str) -> Awaitable[int]:
+        async def _incr() -> int:
+            value = self.values.get(name, 0) + 1
+            self.values[name] = value
+            self.existing.add(name)
+            return value
+
+        return _incr()
+
+    def expire(self, name: str, time: int) -> Awaitable[bool]:
+        async def _expire() -> bool:
+            self.expire_calls.append((name, time))
+            return name in self.existing
+
+        return _expire()
+
+    def delete(self, *names: str) -> Awaitable[int]:
+        async def _delete() -> int:
+            deleted = 0
+            for name in names:
+                self.deleted.append(name)
+                if name in self.existing:
+                    deleted += 1
+                    self.existing.remove(name)
+                self.values.pop(name, None)
+            return deleted
+
+        return _delete()
+
 
 class RecordingProcessor:
     def __init__(self) -> None:
@@ -198,6 +232,16 @@ class BlockingProcessor:
         await self.release.wait()
         text = envelope.payload.get("text")
         return text if isinstance(text, str) else None
+
+
+class FailingProcessor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def process(self, envelope: UpdateEnvelope) -> str | None:
+        del envelope
+        self.calls += 1
+        raise RuntimeError("processing failed")
 
 
 class CallbackRecorder:
@@ -250,7 +294,8 @@ async def test_priority_reads_interactive_before_background() -> None:
     envelope = _envelope()
     queue_redis.read_responses["interactive"].append(_read_response("interactive", envelope))
     queue_redis.read_responses["background"].append(_read_response("background", envelope))
-    worker, callbacks = _worker(queue_redis, FakeCacheRedis())
+    cache_redis = FakeCacheRedis()
+    worker, callbacks = _worker(queue_redis, cache_redis)
 
     assert await worker.run_once()
 
@@ -259,6 +304,7 @@ async def test_priority_reads_interactive_before_background() -> None:
     assert queue_redis.acked == [
         (stream_key("interactive", 0), CONSUMER_GROUPS["interactive"], "1-0")
     ]
+    assert cache_redis.deleted == ["attempts:100"]
 
 
 async def test_priority_reads_background_only_after_interactive_empty() -> None:
@@ -306,7 +352,7 @@ async def test_duplicate_update_is_acknowledged_and_skipped() -> None:
     ]
 
 
-async def test_delivery_limit_moves_message_to_dlq_and_notifies() -> None:
+async def test_reclaim_delivery_count_does_not_trigger_dlq_without_process_attempts() -> None:
     queue_redis = FakeQueueRedis()
     envelope = _envelope(update_id=456)
     stream = stream_key("interactive", 0)
@@ -317,15 +363,29 @@ async def test_delivery_limit_moves_message_to_dlq_and_notifies() -> None:
 
     assert await worker.run_once()
 
-    assert processor.envelopes == []
-    assert len(queue_redis.dlq_entries) == 1
-    _dlq_stream, dlq_fields = queue_redis.dlq_entries[0]
-    assert dlq_fields["source_stream"] == stream
-    assert dlq_fields["source_entry_id"] == "1-0"
-    assert dlq_fields["delivery_count"] == "3"
+    assert [item.update_id for item in processor.envelopes] == [456]
+    assert processor.envelopes[0].attempt == 3
+    assert queue_redis.dlq_entries == []
     assert queue_redis.acked == [(stream, CONSUMER_GROUPS["interactive"], "1-0")]
     expected_reply = "Не получилось обработать запрос, разбираемся."  # noqa: RUF001
-    assert callbacks.replies == [(42, expected_reply)]
+    del expected_reply
+    assert callbacks.replies == [(42, "hello")]
+
+
+async def test_three_started_attempts_move_the_next_delivery_to_dlq() -> None:
+    queue_redis = FakeQueueRedis()
+    cache_redis = FakeCacheRedis()
+    envelope = _envelope(update_id=457)
+    processor = FailingProcessor()
+    worker, callbacks = _worker(queue_redis, cache_redis, processor=processor)
+    for _ in range(4):
+        queue_redis.read_responses["interactive"].append(_read_response("interactive", envelope))
+        assert await worker.run_once()
+
+    assert processor.calls == 3
+    assert len(queue_redis.dlq_entries) == 1
+    assert queue_redis.dlq_entries[0][1]["delivery_count"] == "3"
+    assert cache_redis.deleted.count("attempts:457") == 1
     assert callbacks.admin
 
 
@@ -440,6 +500,31 @@ async def test_graceful_shutdown_finishes_in_flight_message() -> None:
     assert queue_redis.acked == [
         (stream_key("interactive", 0), CONSUMER_GROUPS["interactive"], "1-0")
     ]
+
+
+async def test_lock_is_extended_while_processor_is_running() -> None:
+    queue_redis = FakeQueueRedis()
+    queue_redis.read_responses["interactive"].append(_read_response("interactive", _envelope()))
+    processor = BlockingProcessor()
+    worker, _callbacks = _worker(
+        queue_redis,
+        FakeCacheRedis(),
+        processor=processor,
+        config=WorkerConfig(
+            reclaim_interval_seconds=999,
+            lock_retry_sleep_seconds=0,
+            lock_wait_timeout_seconds=0,
+            lock_extend_interval_seconds=0.001,
+        ),
+    )
+
+    task = asyncio.create_task(worker.run_once())
+    await asyncio.wait_for(processor.started.wait(), timeout=1)
+    await asyncio.sleep(0.01)
+    processor.release.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert any("PEXPIRE" in script for script in queue_redis.eval_calls)
 
 
 def _queue_for_group(groupname: str) -> QueueName:

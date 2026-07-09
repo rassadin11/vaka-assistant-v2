@@ -26,7 +26,15 @@ from core.queue import (
     stream_keys,
 )
 from worker.app import Worker, WorkerConfig
-from worker.processor import EchoProcessor
+
+
+class _PlainEcho:
+    """Worker-level echo processor (the real echo is contextual since 3.2)."""
+
+    async def process(self, envelope: UpdateEnvelope) -> str | None:
+        text = envelope.payload.get("text")
+        return text if isinstance(text, str) else None
+
 
 pytestmark = pytest.mark.integration
 
@@ -112,7 +120,7 @@ async def test_enqueue_then_worker_echoes_reply(
         worker = Worker(
             queue_redis=queue_redis,
             cache_redis=cache_redis,
-            processor=EchoProcessor(),
+            processor=_PlainEcho(),
             send_reply=send_reply,
             send_typing=send_typing,
             notify_admin=notify_admin,

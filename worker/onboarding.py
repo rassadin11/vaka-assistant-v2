@@ -14,9 +14,10 @@ from zoneinfo import available_timezones
 import asyncpg
 import uuid_utils
 
+from core.context import TaskContext
 from core.db import service_transaction
 from core.envelope import UpdateEnvelope
-from worker.processor import Processor
+from worker.processor import ContextualProcessor
 
 APPLICATION_RECEIVED_TEXT = (
     "Привет! Это закрытая бета персонального ассистента. Заявка на доступ отправлена — "
@@ -142,6 +143,7 @@ class NotifyAdmin(Protocol):
 class UserRow:
     """Resolved Telegram user state."""
 
+    id: uuid.UUID
     tg_user_id: int
     tg_chat_id: int
     status: str
@@ -156,7 +158,7 @@ class OnboardingProcessor:
         *,
         service_pool: asyncpg.Pool,
         cache_redis: CacheRedis,
-        inner: Processor,
+        inner: ContextualProcessor,
         send: SendCallback,
         answer_callback: AnswerCallback,
         notify_admin: NotifyAdmin,
@@ -200,7 +202,7 @@ class OnboardingProcessor:
             self._logger.warning("unknown onboarding status: %s", user.status)
             return None
 
-        return await self._process_active_user(envelope, text)
+        return await self._process_active_user(envelope, text, user)
 
     async def _answer_callback_first(self, envelope: UpdateEnvelope) -> None:
         callback_query_id = envelope.payload.get("callback_query_id")
@@ -298,7 +300,7 @@ class OnboardingProcessor:
         async with service_transaction(self._service_pool) as connection:
             row = await connection.fetchrow(
                 """
-                SELECT tg_user_id, tg_chat_id, status, timezone
+                SELECT id, tg_user_id, tg_chat_id, status, timezone
                 FROM users
                 WHERE tg_user_id = $1
                 """,
@@ -307,6 +309,7 @@ class OnboardingProcessor:
         if row is None:
             return None
         return UserRow(
+            id=row["id"],
             tg_user_id=row["tg_user_id"],
             tg_chat_id=row["tg_chat_id"],
             status=row["status"],
@@ -350,6 +353,7 @@ class OnboardingProcessor:
         self,
         envelope: UpdateEnvelope,
         text: str | None,
+        user: UserRow,
     ) -> str | None:
         data = envelope.payload.get("data")
         if envelope.kind == "callback" and isinstance(data, str) and data.startswith("tz:"):
@@ -362,7 +366,16 @@ class OnboardingProcessor:
             return HELP_TEXT
         if text == "/start":
             return ALREADY_ACTIVE_TEXT
-        return await self._inner.process(envelope)
+        return await self._inner.process(
+            envelope,
+            TaskContext(
+                user_id=user.id,
+                tg_user_id=user.tg_user_id,
+                chat_id=user.tg_chat_id,
+                timezone=user.timezone,
+                trace_id=envelope.trace_id,
+            ),
+        )
 
     async def _process_timezone_callback(self, envelope: UpdateEnvelope, data: str) -> str | None:
         timezone = data.removeprefix("tz:")

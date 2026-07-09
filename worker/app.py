@@ -15,7 +15,12 @@ from redis.asyncio import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from core.envelope import UpdateEnvelope
-from core.locks import DEFAULT_USER_LOCK_TTL_MS, acquire_user_lock, release_user_lock
+from core.locks import (
+    DEFAULT_USER_LOCK_TTL_MS,
+    acquire_user_lock,
+    extend_user_lock,
+    release_user_lock,
+)
 from core.queue import (
     DEFAULT_MAX_DELIVERIES,
     DEFAULT_RECLAIM_MIN_IDLE_MS,
@@ -39,6 +44,7 @@ NotifyAdminCallback = Callable[[str], Awaitable[None]]
 
 LOGGER = logging.getLogger(__name__)
 WORKER_DEDUP_TTL_SECONDS = 86_400
+WORKER_ATTEMPT_TTL_SECONDS = 86_400
 
 
 class CacheRedis(Protocol):
@@ -54,6 +60,12 @@ class CacheRedis(Protocol):
         ex: int | None = None,
         nx: bool = False,
     ) -> Awaitable[object]: ...
+
+    def incr(self, name: str) -> Awaitable[int]: ...
+
+    def expire(self, name: str, time: int) -> Awaitable[bool]: ...
+
+    def delete(self, *names: str) -> Awaitable[int]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +89,7 @@ class WorkerConfig:
     reconnect_backoff_initial_seconds: float = 0.5
     reconnect_backoff_max_seconds: float = 10.0
     process_timeout_seconds: float = 120.0
+    lock_extend_interval_seconds: float = 60.0
 
 
 class Worker:
@@ -229,8 +242,25 @@ class Worker:
                 delivery_count=current_delivery_count,
             )
 
-            if current_delivery_count >= self._config.max_deliveries:
-                await move_to_dlq(self._queue_redis, message)
+            dedup_key = f"dedup:worker:{envelope.update_id}"
+            if await self._cache_redis.exists(dedup_key):
+                await ack(self._queue_redis, message.queue, message.stream, message.entry_id)
+                self._logger.info("duplicate message skipped", extra=log_extra)
+                return
+
+            attempt_key = _attempt_key(envelope.update_id)
+            process_attempt = await self._cache_redis.incr(attempt_key)
+            if process_attempt == 1:
+                await self._cache_redis.expire(attempt_key, WORKER_ATTEMPT_TTL_SECONDS)
+            if process_attempt > self._config.max_deliveries:
+                # Record the number of processing attempts actually made, not
+                # the delivery on which the message was diverted to the DLQ.
+                await move_to_dlq(
+                    self._queue_redis,
+                    message,
+                    delivery_count_value=process_attempt - 1,
+                )
+                await self._cache_redis.delete(attempt_key)
                 await send_dlq_notifications(
                     message,
                     notify_admin=self._notify_admin,
@@ -239,17 +269,12 @@ class Worker:
                 self._logger.warning("message moved to dlq", extra=log_extra)
                 return
 
-            dedup_key = f"dedup:worker:{envelope.update_id}"
-            if await self._cache_redis.exists(dedup_key):
-                await ack(self._queue_redis, message.queue, message.stream, message.entry_id)
-                self._logger.info("duplicate message skipped", extra=log_extra)
-                return
-
             reply_text = await self._process_with_typing(envelope)
             if reply_text is not None:
                 await self._send_reply(envelope.chat_id, reply_text)
             await self._cache_redis.set(dedup_key, "1", ex=WORKER_DEDUP_TTL_SECONDS, nx=True)
             await ack(self._queue_redis, message.queue, message.stream, message.entry_id)
+            await self._cache_redis.delete(attempt_key)
             self._logger.info("message acknowledged", extra=log_extra)
         except TimeoutError:
             self._logger.exception("message processing timed out", extra=log_extra)
@@ -297,6 +322,7 @@ class Worker:
     async def _process_with_typing(self, envelope: UpdateEnvelope) -> str | None:
         await self._send_typing(envelope.chat_id)
         typing_task = asyncio.create_task(self._typing_loop(envelope.chat_id))
+        lock_extension_task = asyncio.create_task(self._lock_extension_loop(envelope.user_id))
         try:
             return await asyncio.wait_for(
                 self._processor.process(envelope),
@@ -304,10 +330,29 @@ class Worker:
             )
         finally:
             typing_task.cancel()
+            lock_extension_task.cancel()
             with suppress(asyncio.CancelledError):
                 await typing_task
+            with suppress(asyncio.CancelledError):
+                await lock_extension_task
 
     async def _typing_loop(self, chat_id: int) -> None:
         while True:
             await asyncio.sleep(self._config.typing_interval_seconds)
             await self._send_typing(chat_id)
+
+    async def _lock_extension_loop(self, user_id: int) -> None:
+        while True:
+            await asyncio.sleep(self._config.lock_extend_interval_seconds)
+            extended = await extend_user_lock(
+                self._queue_redis,
+                user_id,
+                self._config.worker_token,
+                ttl_ms=self._config.lock_ttl_ms,
+            )
+            if not extended:
+                self._logger.warning("user lock extension failed user_id=%s", user_id)
+
+
+def _attempt_key(update_id: int) -> str:
+    return f"attempts:{update_id}"
