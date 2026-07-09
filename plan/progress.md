@@ -18,7 +18,9 @@
 - [x] 1.5 Infisical + machine identities (2026-07-09, идемпотентный bootstrap, 3 identity верифицированы, core/secrets.py; учётки вне репо; Codex + приёмка Claude; commit de161cc)
 - [x] 1.6 Миграция v1 (13 таблиц по db-schema.md) (2026-07-09, Codex + opus-ревью против спеки + приёмка Claude; уточнения спеки: RLS-шаблон fail-closed, user_id NOT NULL; commit 7875092)
 - [x] 1.7 Envelope-шифрование oauth_tokens (2026-07-09, core/crypto.py: AES-256-GCM, версионируемый KEK, key_version в AAD; Codex + приёмка Claude; commit 46d4360)
-- [ ] 1.8 Бэкапы + restore-to-dev.sh
+- [x] 1.8 Бэкапы + restore-to-dev.sh (2026-07-09, pgBackRest 2 шифрованных репо 7d/4w + WAL, restore в отдельный контейнер с маркерной проверкой PASS, RDB-снапшоты redis-queue, дамп Infisical; Codex + приёмка Claude; commit 3ab7d4f)
+
+DoD 1A выполнен (2026-07-09): `make dev-up` с нуля до рабочего состояния; миграция v1 ролью migrator; RLS-тест и PgBouncer smoke зелёные (локально и в CI); restore-to-dev.sh восстанавливает бэкап с проверкой.
 
 ## Этап 1B. Боевой сервер (к закрытой бете)
 - [ ] 1.9 Сервер + hardening
