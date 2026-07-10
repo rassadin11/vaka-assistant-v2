@@ -30,6 +30,11 @@ dev = [
     "httpx>=0.28.1",
     "types-croniter>=6.2.3.20260704",
 ]
+embeddings = [
+    "numpy>=1.26",
+    "sentence-transformers>=3.3,<6",
+    "transformers>=4.48,<5",
+]
 
 [build-system]
 requires = ["hatchling"]
