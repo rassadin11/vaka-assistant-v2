@@ -13,6 +13,7 @@ import asyncpg
 from core.agent import AgentLoop, AgentLoopConfig
 from core.context import TaskContext
 from core.context_manager import UserDynamics, build_context
+from core.db import user_transaction
 from core.dialog_store import (
     MessageDraft,
     load_dialog,
@@ -20,6 +21,7 @@ from core.dialog_store import (
     save_summary,
     to_llm_messages,
 )
+from core.embeddings import EmbeddingsProvider, EmbeddingsUnavailableError
 from core.envelope import UpdateEnvelope
 from core.llm import LLMMessage, LLMProvider
 from core.prompt import PROMPT_VERSION
@@ -33,6 +35,8 @@ from worker.app import SendReplyCallback
 
 UNSUPPORTED_CONTENT_TEXT = "Пока я понимаю только текст."
 LOGGER = logging.getLogger(__name__)
+AUTOINJECT_THRESHOLD = 0.80
+AUTOINJECT_LIMIT = 5
 
 
 class AgentProcessor:
@@ -47,6 +51,7 @@ class AgentProcessor:
         app_pool: asyncpg.Pool,
         send: SendReplyCallback,
         logger: logging.Logger | None = None,
+        embeddings: EmbeddingsProvider | None = None,
     ) -> None:
         self._provider = provider
         self._dispatcher = dispatcher
@@ -54,6 +59,7 @@ class AgentProcessor:
         self._app_pool = app_pool
         self._send = send
         self._logger = logger if logger is not None else LOGGER
+        self._embeddings = embeddings
         self._background_tasks: set[asyncio.Task[None]] = set()
 
     async def process(self, envelope: UpdateEnvelope, context: TaskContext) -> str | None:
@@ -66,9 +72,16 @@ class AgentProcessor:
             return UNSUPPORTED_CONTENT_TEXT
 
         history = await load_dialog(self._app_pool, context.user_id)
+        facts = await _load_memory_facts(
+            self._app_pool,
+            context,
+            text,
+            self._embeddings,
+            self._logger,
+        )
         built = build_context(
             _dynamics(context.timezone, context.plan),
-            facts=(),
+            facts=facts,
             summary=history.summary,
             tail=to_llm_messages(history.tail),
         )
@@ -174,3 +187,59 @@ def _queue_for_envelope(envelope: UpdateEnvelope) -> QueueName:
     if envelope.kind == "text":
         return "interactive"
     return "background"
+
+
+async def _load_memory_facts(
+    pool: asyncpg.Pool,
+    context: TaskContext,
+    text: str,
+    embeddings: EmbeddingsProvider | None,
+    logger: logging.Logger,
+) -> tuple[str, ...]:
+    """Retrieve relevant user facts without allowing memory outages to stop a task."""
+
+    if embeddings is None:
+        _memory_warning(logger, "memory autoinject skipped: memory disabled")
+        return ()
+    try:
+        vectors = await embeddings.embed([text], "query")
+    except EmbeddingsUnavailableError:
+        _memory_warning(logger, "memory autoinject skipped: embeddings unavailable")
+        return ()
+    if len(vectors) != 1:
+        _memory_warning(logger, "memory autoinject skipped: invalid embeddings response")
+        return ()
+
+    from tools.memory import vector_to_literal
+
+    vector_literal = vector_to_literal(vectors[0])
+    async with user_transaction(pool, context.user_id) as connection:
+        rows = await connection.fetch(
+            """
+            SELECT id, text, 1 - (embedding <=> $1::vector) AS sim
+            FROM memory_facts
+            WHERE 1 - (embedding <=> $1::vector) >= $2
+            ORDER BY embedding <=> $1::vector
+            LIMIT $3
+            """,
+            vector_literal,
+            AUTOINJECT_THRESHOLD,
+            AUTOINJECT_LIMIT,
+        )
+        selected = [row for row in rows if float(row["sim"]) >= AUTOINJECT_THRESHOLD][
+            :AUTOINJECT_LIMIT
+        ]
+        if selected:
+            await connection.execute(
+                "UPDATE memory_facts SET last_used_at = now() WHERE id = ANY($1::uuid[])",
+                [row["id"] for row in selected],
+            )
+    return tuple(str(row["text"]) for row in selected)
+
+
+def _memory_warning(logger: logging.Logger, message: str) -> None:
+    """Log memory degradation while preserving lightweight test loggers."""
+
+    warning = getattr(logger, "warning", None)
+    if callable(warning):
+        warning(message)

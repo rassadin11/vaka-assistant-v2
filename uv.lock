@@ -1830,6 +1830,7 @@ dependencies = [
     { name = "croniter" },
     { name = "cryptography" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "matplotlib" },
     { name = "openai" },
     { name = "psycopg", extra = ["binary"] },
@@ -1843,7 +1844,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "asyncpg-stubs" },
-    { name = "httpx" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1864,6 +1864,7 @@ requires-dist = [
     { name = "croniter", specifier = ">=6.2.4" },
     { name = "cryptography", specifier = ">=49.0.0" },
     { name = "fastapi", specifier = ">=0.139.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "matplotlib", specifier = ">=3.10.0" },
     { name = "openai", specifier = ">=2.45.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
@@ -1877,7 +1878,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "asyncpg-stubs", specifier = ">=0.31.2" },
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "mypy", specifier = ">=1.14" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.25" },

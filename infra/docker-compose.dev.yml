@@ -1,6 +1,21 @@
 name: personal-assistant-dev
 
 services:
+  embeddings:
+    image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+    working_dir: /app
+    command: ["uv", "run", "--group", "embeddings", "uvicorn", "embeddings.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      HF_HOME: /cache
+      # The repo mount contains a Windows .venv; keep the container venv apart.
+      UV_PROJECT_ENVIRONMENT: /opt/venv
+    ports:
+      - "127.0.0.1:8090:8000"
+    volumes:
+      - ../:/app
+      - ${HF_CACHE_HOST_PATH:-D:/hf-cache}:/cache
+      - embeddings-uv-cache:/root/.cache/uv
+
   postgres:
     build:
       context: ./postgres
@@ -167,6 +182,7 @@ services:
       start_period: 5s
 
 volumes:
+  embeddings-uv-cache:
   postgres_data:
   postgres_restore_data:
   pgbackrest_repo:

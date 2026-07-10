@@ -6,9 +6,11 @@ import asyncpg
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.context import TaskContext
+from core.embeddings import EmbeddingsProvider
 from core.tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
 from tools.clock import get_current_time
 from tools.finance import SendPhoto, register_finance_tools
+from tools.memory import register_memory_tools
 from tools.reminders import register_reminder_tools
 
 
@@ -40,6 +42,7 @@ def register_builtin_tools(
     registry: ToolRegistry,
     app_pool: asyncpg.Pool | None = None,
     send_photo: SendPhoto | None = None,
+    embeddings: EmbeddingsProvider | None = None,
 ) -> None:
     """Register the intentionally small stage-4 baseline in stable order."""
 
@@ -55,6 +58,8 @@ def register_builtin_tools(
     if app_pool is not None:
         register_finance_tools(registry, app_pool, send_photo)
         register_reminder_tools(registry, app_pool)
+        if embeddings is not None:
+            register_memory_tools(registry, app_pool, embeddings)
     registry.register(
         ToolSpec(
             name="echo_confirm_test_only",

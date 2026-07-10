@@ -27,6 +27,7 @@ from redis.asyncio import Redis
 from core.agent import AgentLoopConfig
 from core.config import admin_ids_from_env, optional_telegram_bot_token
 from core.db import create_pool, create_service_pool
+from core.embeddings import EmbeddingsProvider, HttpEmbeddingsProvider
 from core.envelope import UpdateEnvelope
 from core.llm_openrouter import OpenRouterProvider, openrouter_settings_from_env
 from core.llm_resilient import ResilientLLMProvider
@@ -80,6 +81,7 @@ async def _run() -> None:
     config = config_from_env()
     admin_ids = admin_ids_from_env()
     plain_echo = _env_bool("WORKER_PLAIN_ECHO")
+    embeddings = _embeddings_provider_from_env()
     service_pool: asyncpg.Pool | None = None
     app_pool: asyncpg.Pool | None = None
     if not plain_echo:
@@ -129,8 +131,10 @@ async def _run() -> None:
         if service_pool is None or app_pool is None:
             raise RuntimeError("database pools are required outside WORKER_PLAIN_ECHO mode")
         registry = ToolRegistry(queue_redis, app_pool, send_confirmation=rich_send)
-        register_builtin_tools(registry, app_pool, send_photo)
-        inner = _active_inner_processor(queue_redis, app_pool, send_reply, notify_admin, registry)
+        register_builtin_tools(registry, app_pool, send_photo, embeddings)
+        inner = _active_inner_processor(
+            queue_redis, app_pool, send_reply, notify_admin, registry, embeddings
+        )
         confirmation_handler = ConfirmationProcessor(
             queue_redis,
             app_pool,
@@ -302,6 +306,7 @@ def _active_inner_processor(
     send_reply: SendReplyCallback,
     notify_admin: NotifyAdminCallback,
     registry: ToolRegistry,
+    embeddings: EmbeddingsProvider | None = None,
 ) -> AgentProcessor | EchoProcessor:
     """Choose the production agent only when its API key can be resolved."""
 
@@ -344,7 +349,18 @@ def _active_inner_processor(
         agent_config,
         app_pool=app_pool,
         send=send_reply,
+        embeddings=embeddings,
     )
+
+
+def _embeddings_provider_from_env() -> EmbeddingsProvider | None:
+    """Return a configured internal embeddings client, or explicitly disable memory."""
+
+    url = os.getenv("EMBEDDINGS_URL", "").strip()
+    if not url:
+        logging.getLogger(__name__).warning("memory disabled")
+        return None
+    return HttpEmbeddingsProvider(url)
 
 
 class TestableEchoProcessor:
