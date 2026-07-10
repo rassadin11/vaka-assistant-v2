@@ -2,6 +2,9 @@ name: personal-assistant-dev
 
 services:
   embeddings:
+    # Heavy ML service: opt-in via `--profile ml` (CI and default dev-up skip it;
+    # the Windows bind-mount default below breaks Linux runners otherwise).
+    profiles: ["ml"]
     image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
     working_dir: /app
     command: ["uv", "run", "--group", "embeddings", "uvicorn", "embeddings.app:app", "--host", "0.0.0.0", "--port", "8000"]
