@@ -29,6 +29,7 @@ from core.db import create_service_pool
 from core.envelope import UpdateEnvelope
 from core.llm_openrouter import OpenRouterProvider, openrouter_settings_from_env
 from core.llm_resilient import ResilientLLMProvider
+from core.model_router import RouteRequest, StaticModelRouter
 from core.queue import redis_settings_from_env
 from core.secrets import EnvSecretsProvider, SecretNotFoundError
 from core.telegram_sender import TelegramSender
@@ -261,6 +262,16 @@ def _active_inner_processor(
         {"get_current_time": get_current_time},
     )
     settings = openrouter_settings_from_env()
+    route = StaticModelRouter(settings.model).route(
+        RouteRequest(task_type="interactive", user_plan="standard")
+    )
+    if route.model != settings.model:
+        raise RuntimeError("The routed model must match the configured OpenRouter model.")
+    agent_config = AgentLoopConfig.from_env()
+    agent_config = replace(
+        agent_config,
+        task_budget_rub=agent_config.task_budget_rub * route.budget_multiplier,
+    )
     fallback_model = os.getenv("OPENROUTER_FALLBACK_MODEL", "").strip()
     fallback_provider = (
         OpenRouterProvider(replace(settings, model=fallback_model)) if fallback_model else None
@@ -276,7 +287,7 @@ def _active_inner_processor(
                 notify_admin=notify_admin,
             ),
             dispatcher,
-            AgentLoopConfig.from_env(),
+            agent_config,
         ),
         send=send_reply,
     )
