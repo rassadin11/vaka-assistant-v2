@@ -1,0 +1,10 @@
+# Development-only internal SearXNG configuration.
+use_default_settings: true
+
+search:
+  formats: [html, json]
+
+server:
+  # Overridden by SEARXNG_SECRET supplied by Docker Compose.
+  secret_key: dev-only-searxng-secret-change-before-production
+  limiter: false

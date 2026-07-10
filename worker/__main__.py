@@ -131,7 +131,14 @@ async def _run() -> None:
         if service_pool is None or app_pool is None:
             raise RuntimeError("database pools are required outside WORKER_PLAIN_ECHO mode")
         registry = ToolRegistry(queue_redis, app_pool, send_confirmation=rich_send)
-        register_builtin_tools(registry, app_pool, send_photo, embeddings)
+        register_builtin_tools(
+            registry,
+            app_pool,
+            send_photo,
+            embeddings,
+            cache_redis,
+            os.getenv("SEARXNG_URL", "http://127.0.0.1:8091").strip() or "http://127.0.0.1:8091",
+        )
         inner = _active_inner_processor(
             queue_redis, app_pool, send_reply, notify_admin, registry, embeddings
         )

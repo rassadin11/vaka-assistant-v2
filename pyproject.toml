@@ -17,6 +17,7 @@ dependencies = [
     "pydantic>=2.13.4",
     "redis>=8.0.1",
     "tiktoken>=0.13.0",
+    "trafilatura>=2.1.0",
     "uuid-utils>=0.17.0",
     "uvicorn>=0.51.0",
 ]
@@ -54,6 +55,10 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 python_version = "3.12"
 strict = true
 packages = ["gateway", "worker", "core", "tools"]
+
+[[tool.mypy.overrides]]
+module = ["trafilatura"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

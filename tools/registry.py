@@ -12,6 +12,7 @@ from tools.clock import get_current_time
 from tools.finance import SendPhoto, register_finance_tools
 from tools.memory import register_memory_tools
 from tools.reminders import register_reminder_tools
+from tools.web import CacheRedis, register_web_tools
 
 
 class EmptyArgs(BaseModel):
@@ -43,6 +44,8 @@ def register_builtin_tools(
     app_pool: asyncpg.Pool | None = None,
     send_photo: SendPhoto | None = None,
     embeddings: EmbeddingsProvider | None = None,
+    cache_redis: CacheRedis | None = None,
+    searxng_url: str = "http://127.0.0.1:8091",
 ) -> None:
     """Register the intentionally small stage-4 baseline in stable order."""
 
@@ -60,6 +63,9 @@ def register_builtin_tools(
         register_reminder_tools(registry, app_pool)
         if embeddings is not None:
             register_memory_tools(registry, app_pool, embeddings)
+    if cache_redis is None:
+        raise ValueError("cache_redis is required to register built-in web tools")
+    register_web_tools(registry, cache_redis, searxng_url)
     registry.register(
         ToolSpec(
             name="echo_confirm_test_only",

@@ -258,8 +258,8 @@ async def _sender(_chat_id: int, _text: str, _buttons: list[list[tuple[str, str]
 
 
 def test_registered_schemas_follow_the_v1_contract() -> None:
-    registry, _redis, pool = _registry(sender=_sender)
-    register_builtin_tools(registry, pool)
+    registry, redis, pool = _registry(sender=_sender)
+    register_builtin_tools(registry, pool, cache_redis=redis)
 
     for spec in registry.get_for_context(_context()):
         schema = spec.to_llm_definition().parameters

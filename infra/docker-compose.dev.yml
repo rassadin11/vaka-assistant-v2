@@ -1,6 +1,17 @@
 name: personal-assistant-dev
 
 services:
+  searxng:
+    image: searxng/searxng:latest
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-dev-only-searxng-secret-change-before-production}
+      SEARXNG_BASE_URL: ${SEARXNG_BASE_URL:-http://127.0.0.1:8091/}
+      FORCE_OWNERSHIP: "false"
+    ports:
+      - "127.0.0.1:8091:8080"
+    volumes:
+      - ./searxng/:/etc/searxng/:ro
+
   embeddings:
     # Heavy ML service: opt-in via `--profile ml` (CI and default dev-up skip it;
     # the Windows bind-mount default below breaks Linux runners otherwise).
