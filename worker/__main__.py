@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import signal
+from dataclasses import replace
 from typing import NoReturn, cast
 
 import asyncpg
@@ -26,7 +27,8 @@ from core.agent import AgentLoop, AgentLoopConfig
 from core.config import admin_ids_from_env, optional_telegram_bot_token
 from core.db import create_service_pool
 from core.envelope import UpdateEnvelope
-from core.llm_openrouter import OpenRouterProvider
+from core.llm_openrouter import OpenRouterProvider, openrouter_settings_from_env
+from core.llm_resilient import ResilientLLMProvider
 from core.queue import redis_settings_from_env
 from core.secrets import EnvSecretsProvider, SecretNotFoundError
 from core.telegram_sender import TelegramSender
@@ -111,7 +113,7 @@ async def _run() -> None:
     else:
         if service_pool is None:
             raise RuntimeError("service pool is required outside WORKER_PLAIN_ECHO mode")
-        inner = _active_inner_processor(send_reply)
+        inner = _active_inner_processor(queue_redis, send_reply, notify_admin)
         processor = OnboardingProcessor(
             service_pool=service_pool,
             cache_redis=cache_redis,
@@ -238,7 +240,11 @@ def _env_bool(name: str) -> bool:
     return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _active_inner_processor(send_reply: SendReplyCallback) -> AgentProcessor | EchoProcessor:
+def _active_inner_processor(
+    queue_redis: Redis,
+    send_reply: SendReplyCallback,
+    notify_admin: NotifyAdminCallback,
+) -> AgentProcessor | EchoProcessor:
     """Choose the production agent only when its API key can be resolved."""
 
     try:
@@ -254,9 +260,24 @@ def _active_inner_processor(send_reply: SendReplyCallback) -> AgentProcessor | E
         [GET_CURRENT_TIME_DEFINITION],
         {"get_current_time": get_current_time},
     )
+    settings = openrouter_settings_from_env()
+    fallback_model = os.getenv("OPENROUTER_FALLBACK_MODEL", "").strip()
+    fallback_provider = (
+        OpenRouterProvider(replace(settings, model=fallback_model)) if fallback_model else None
+    )
     logging.getLogger(__name__).info("inner processor active: agent")
     return AgentProcessor(
-        AgentLoop(OpenRouterProvider(), dispatcher, AgentLoopConfig.from_env()),
+        AgentLoop(
+            ResilientLLMProvider(
+                OpenRouterProvider(settings),
+                queue_redis,
+                settings.model,
+                fallback_provider=fallback_provider,
+                notify_admin=notify_admin,
+            ),
+            dispatcher,
+            AgentLoopConfig.from_env(),
+        ),
         send=send_reply,
     )
 

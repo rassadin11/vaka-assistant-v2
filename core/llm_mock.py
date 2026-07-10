@@ -29,12 +29,12 @@ class MockLLMCall:
 class MockLLMProvider:
     """Return scripted responses while recording every request."""
 
-    def __init__(self, responses: Sequence[LLMResponse]) -> None:
+    def __init__(self, responses: Sequence[LLMResponse | BaseException]) -> None:
         self._responses = list(responses)
         self.calls: list[MockLLMCall] = []
 
     @classmethod
-    def scripted(cls, responses: Sequence[LLMResponse]) -> MockLLMProvider:
+    def scripted(cls, responses: Sequence[LLMResponse | BaseException]) -> MockLLMProvider:
         """Create a mock provider from a response sequence."""
 
         return cls(responses)
@@ -59,7 +59,10 @@ class MockLLMProvider:
         )
         if not self._responses:
             raise AssertionError("MockLLMProvider script is exhausted.")
-        return self._responses.pop(0)
+        response = self._responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
 def mock_text_response(text: str, *, model: str = _DEFAULT_MODEL) -> LLMResponse:
