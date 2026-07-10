@@ -51,6 +51,7 @@ from worker.onboarding import (
 )
 from worker.outbox import OutboxProcessor
 from worker.processor import EchoProcessor, Processor
+from worker.scheduler import SchedulerProcessor
 
 ButtonRows = list[list[tuple[str, str]]]
 RichSendCallback = SendCallback
@@ -120,6 +121,7 @@ async def _run() -> None:
         answer_callback = sender.answer_callback_query
     processor: Processor
     outbox_processor: OutboxProcessor | None = None
+    scheduler_processor: SchedulerProcessor | None = None
     if plain_echo:
         processor = TestableEchoProcessor()
         logging.getLogger(__name__).info("inner processor active: plain echo")
@@ -135,6 +137,7 @@ async def _run() -> None:
             send_reply=send_reply,
         )
         outbox_processor = OutboxProcessor(service_pool, registry, send_reply=send_reply)
+        scheduler_processor = SchedulerProcessor(service_pool, send_reply=send_reply)
         processor = OnboardingProcessor(
             service_pool=service_pool,
             cache_redis=cache_redis,
@@ -158,6 +161,9 @@ async def _run() -> None:
     outbox_task = (
         asyncio.create_task(outbox_processor.run()) if outbox_processor is not None else None
     )
+    scheduler_task = (
+        asyncio.create_task(scheduler_processor.run()) if scheduler_processor is not None else None
+    )
     try:
         await worker.run()
     except KeyboardInterrupt:
@@ -165,8 +171,12 @@ async def _run() -> None:
     finally:
         if outbox_processor is not None:
             outbox_processor.request_stop()
+        if scheduler_processor is not None:
+            scheduler_processor.request_stop()
         if outbox_task is not None:
             await outbox_task
+        if scheduler_task is not None:
+            await scheduler_task
         await queue_redis.aclose()
         await cache_redis.aclose()
         if service_pool is not None:

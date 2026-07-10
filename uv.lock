@@ -545,6 +545,18 @@ wheels = [
 ]
 
 [[package]]
+name = "croniter"
+version = "6.2.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/37/57/2e2a65aee2a70483cb28e2b7e15a072d00a523207593b44400d4717bb100/croniter-6.2.4.tar.gz", hash = "sha256:fc124f751b1b04805c2a04b061898b436b45ab2320b045e1e052ea895de65189", size = 166267, upload-time = "2026-07-10T09:52:59.955Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cd/ba/d678e5bd329646ca51d3c92addbc77804e86d21f4b6b6a027218e6abb010/croniter-6.2.4-py3-none-any.whl", hash = "sha256:8ef3d544107a5c05a150a2d78f8bf5a8eb9c5c4d93405a736b824109574e3f4d", size = 46677, upload-time = "2026-07-10T09:52:58.425Z" },
+]
+
+[[package]]
 name = "cryptography"
 version = "49.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1471,6 +1483,7 @@ dependencies = [
     { name = "aiogram" },
     { name = "alembic" },
     { name = "asyncpg" },
+    { name = "croniter" },
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "matplotlib" },
@@ -1491,6 +1504,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
+    { name = "types-croniter" },
 ]
 
 [package.metadata]
@@ -1498,6 +1512,7 @@ requires-dist = [
     { name = "aiogram", specifier = ">=3.29.1" },
     { name = "alembic", specifier = ">=1.18.5" },
     { name = "asyncpg", specifier = ">=0.31.0" },
+    { name = "croniter", specifier = ">=6.2.4" },
     { name = "cryptography", specifier = ">=49.0.0" },
     { name = "fastapi", specifier = ">=0.139.0" },
     { name = "matplotlib", specifier = ">=3.10.0" },
@@ -1518,6 +1533,7 @@ dev = [
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.25" },
     { name = "ruff", specifier = ">=0.9" },
+    { name = "types-croniter", specifier = ">=6.2.3.20260704" },
 ]
 
 [[package]]
@@ -2176,6 +2192,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ae/5f/57ff8b434839e70dab45601284ea413e947a63799891b7553e5960a793a8/tqdm-4.68.4.tar.gz", hash = "sha256:19829c9673638f2a0b8617da4cdcb927e831cd88bcfcb6e78d42a4d1af131520", size = 792418, upload-time = "2026-07-07T09:58:18.369Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/22/2a/5e5e750890ada51017d18d0d4c30da696e5b5bd3180947729927628fc3cb/tqdm-4.68.4-py3-none-any.whl", hash = "sha256:5168118b2368f48c561afda8020fd79195b1bdb0bdf8086b88442c267a315dc2", size = 676612, upload-time = "2026-07-07T09:58:16.256Z" },
+]
+
+[[package]]
+name = "types-croniter"
+version = "6.2.3.20260704"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/61/e3/1aa1ba2a3d03cea8434f1eb9802229ce14693e5bedd16a123ddad4a6368f/types_croniter-6.2.3.20260704.tar.gz", hash = "sha256:95e0bf0ff047c7857c59da41ecd786d392e36b923d78b7cceacd8c7e6a68fb3d", size = 12147, upload-time = "2026-07-04T05:34:19.996Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dc/bc/cfe8926712a1bcdfc201d5cbb1c6153ce0a1506105d45635f7984a9c2945/types_croniter-6.2.3.20260704-py3-none-any.whl", hash = "sha256:1e5524d73222252568cefbc69d42b4c105f5f0b749be5771c4a222d1cf84b837", size = 9744, upload-time = "2026-07-04T05:34:18.995Z" },
 ]
 
 [[package]]

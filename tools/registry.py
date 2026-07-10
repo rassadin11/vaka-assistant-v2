@@ -9,6 +9,7 @@ from core.context import TaskContext
 from core.tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
 from tools.clock import get_current_time
 from tools.finance import SendPhoto, register_finance_tools
+from tools.reminders import register_reminder_tools
 
 
 class EmptyArgs(BaseModel):
@@ -53,6 +54,7 @@ def register_builtin_tools(
     )
     if app_pool is not None:
         register_finance_tools(registry, app_pool, send_photo)
+        register_reminder_tools(registry, app_pool)
     registry.register(
         ToolSpec(
             name="echo_confirm_test_only",
