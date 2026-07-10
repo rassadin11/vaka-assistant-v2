@@ -9,6 +9,7 @@ from core.context import TaskContext
 from core.embeddings import EmbeddingsProvider
 from core.tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
 from tools.clock import get_current_time
+from tools.documents import register_document_tools
 from tools.finance import SendPhoto, register_finance_tools
 from tools.memory import register_memory_tools
 from tools.reminders import register_reminder_tools
@@ -61,6 +62,7 @@ def register_builtin_tools(
     if app_pool is not None:
         register_finance_tools(registry, app_pool, send_photo)
         register_reminder_tools(registry, app_pool)
+        register_document_tools(registry, app_pool, embeddings)
         if embeddings is not None:
             register_memory_tools(registry, app_pool, embeddings)
     if cache_redis is None:

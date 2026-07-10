@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from io import BytesIO
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import BufferedInputFile
 
-from core.telegram_sender import SendRateLimiter, TelegramSender
+from core.telegram_sender import MAX_TELEGRAM_DOWNLOAD_BYTES, SendRateLimiter, TelegramSender
 
 
 class FakeClock:
@@ -32,6 +34,8 @@ class FakeBot:
         self.message_outcomes: list[object] = []
         self.photos: list[tuple[int, BufferedInputFile, str | None]] = []
         self.photo_outcomes: list[object] = []
+        self.downloaded_paths: list[str] = []
+        self.download_data = b"file"
 
     async def send_message(
         self,
@@ -68,6 +72,17 @@ class FakeBot:
     async def answer_callback_query(self, callback_query_id: str) -> object:
         self.callback_answers.append(callback_query_id)
         return object()
+
+    async def get_file(self, file_id: str) -> object:
+        return SimpleNamespace(file_path=f"files/{file_id}")
+
+    async def download_file(
+        self, file_path: str, destination: BytesIO, *, timeout: int = 30
+    ) -> object:
+        del timeout
+        self.downloaded_paths.append(file_path)
+        destination.write(self.download_data)
+        return destination
 
 
 async def test_rate_limiter_paces_same_chat_messages() -> None:
@@ -176,3 +191,15 @@ async def test_typing_uses_global_pacing_without_per_chat_delay() -> None:
 
     assert bot.actions == [(42, "typing"), (42, "typing")]
     assert clock.sleeps == [pytest.approx(1 / 30)]
+
+
+async def test_sender_downloads_by_file_id_and_aborts_at_20_mib() -> None:
+    bot = FakeBot()
+    sender = TelegramSender(bot)
+
+    assert await sender.download_file("abc", 100) == b"file"
+    assert bot.downloaded_paths == ["files/abc"]
+
+    bot.download_data = b"x" * (MAX_TELEGRAM_DOWNLOAD_BYTES + 1)
+    with pytest.raises(ValueError, match="download limit"):
+        await sender.download_file("oversized", MAX_TELEGRAM_DOWNLOAD_BYTES + 1)

@@ -115,6 +115,20 @@ def _text_update(update_id: int = 1, chat_type: str = "private") -> dict[str, An
     }
 
 
+def _document_update(update_id: int = 2) -> dict[str, Any]:
+    update = _text_update(update_id)
+    message = update["message"]
+    assert isinstance(message, dict)
+    message.pop("text")
+    message["document"] = {
+        "file_id": "pdf-file",
+        "file_size": 123,
+        "file_name": "notes.pdf",
+        "mime_type": "application/pdf",
+    }
+    return update
+
+
 async def test_text_update_enqueued_and_dedup_key_set_after() -> None:
     enqueue = RecordingEnqueue()
     cache = FakeCacheRedis()
@@ -130,6 +144,19 @@ async def test_text_update_enqueued_and_dedup_key_set_after() -> None:
     assert envelope.kind == "text"
     assert envelope.payload == {"text": "hello"}
     assert cache.set_calls == [("dedup:1", "1", 86_400, True)]
+
+
+async def test_document_update_is_enqueued_to_background() -> None:
+    enqueue = RecordingEnqueue()
+    await handle_update(
+        _document_update(),
+        queue_redis=FakeQueueRedis(),
+        cache_redis=FakeCacheRedis(),
+        enqueue_func=enqueue,
+    )
+
+    assert enqueue.envelopes[0][0] == "background"
+    assert enqueue.envelopes[0][1].kind == "document"
 
 
 async def test_dedup_key_not_set_when_enqueue_fails() -> None:

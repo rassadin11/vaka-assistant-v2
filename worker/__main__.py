@@ -17,7 +17,7 @@ import os
 import signal
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from typing import NoReturn, cast
+from typing import TYPE_CHECKING, NoReturn, cast
 
 import asyncpg
 from aiogram import Bot
@@ -26,6 +26,7 @@ from redis.asyncio import Redis
 
 from core.agent import AgentLoopConfig
 from core.config import admin_ids_from_env, optional_telegram_bot_token
+from core.context import TaskContext
 from core.db import create_pool, create_service_pool
 from core.embeddings import EmbeddingsProvider, HttpEmbeddingsProvider
 from core.envelope import UpdateEnvelope
@@ -51,12 +52,16 @@ from worker.onboarding import (
     NotifyAdmin as OnboardingNotifyAdmin,
 )
 from worker.outbox import OutboxProcessor
-from worker.processor import EchoProcessor, Processor
+from worker.processor import ContextualProcessor, EchoProcessor, Processor
 from worker.scheduler import SchedulerProcessor
+
+if TYPE_CHECKING:
+    from worker.documents import PdfIngestProcessor
 
 ButtonRows = list[list[tuple[str, str]]]
 RichSendCallback = SendCallback
 type SendPhotoCallback = Callable[[int, bytes, str | None], Awaitable[None]]
+type DownloadFileCallback = Callable[[str, int], Awaitable[bytes]]
 
 
 def main() -> NoReturn:
@@ -97,6 +102,7 @@ async def _run() -> None:
     notify_admin: NotifyAdminCallback
     rich_send: RichSendCallback
     send_photo: SendPhotoCallback
+    download_file: DownloadFileCallback | None
     answer_callback: AnswerCallback
     if reply_stream is not None:
         send_reply = _stream_reply(queue_redis, reply_stream)
@@ -104,6 +110,7 @@ async def _run() -> None:
         notify_admin = _stream_admin(queue_redis, reply_stream)
         rich_send = _rich_send_from_reply(send_reply)
         send_photo = _noop_photo
+        download_file = None
         answer_callback = _log_callback_answer
     elif token is None:
         send_reply = _log_reply
@@ -111,6 +118,7 @@ async def _run() -> None:
         notify_admin = _log_admin
         rich_send = _log_rich_send
         send_photo = _noop_photo
+        download_file = None
         answer_callback = _log_callback_answer
     else:
         bot = Bot(token)
@@ -120,6 +128,7 @@ async def _run() -> None:
         notify_admin = sender.notify_admins
         rich_send = _rich_send_adapter(sender)
         send_photo = sender.send_photo
+        download_file = sender.download_file
         answer_callback = sender.answer_callback_query
     processor: Processor
     outbox_processor: OutboxProcessor | None = None
@@ -128,6 +137,8 @@ async def _run() -> None:
         processor = TestableEchoProcessor()
         logging.getLogger(__name__).info("inner processor active: plain echo")
     else:
+        from worker.documents import PdfIngestProcessor
+
         if service_pool is None or app_pool is None:
             raise RuntimeError("database pools are required outside WORKER_PLAIN_ECHO mode")
         registry = ToolRegistry(queue_redis, app_pool, send_confirmation=rich_send)
@@ -142,6 +153,7 @@ async def _run() -> None:
         inner = _active_inner_processor(
             queue_redis, app_pool, send_reply, notify_admin, registry, embeddings
         )
+        document_processor = PdfIngestProcessor(app_pool, queue_redis, download_file, embeddings)
         confirmation_handler = ConfirmationProcessor(
             queue_redis,
             app_pool,
@@ -152,7 +164,7 @@ async def _run() -> None:
         processor = OnboardingProcessor(
             service_pool=service_pool,
             cache_redis=cache_redis,
-            inner=inner,
+            inner=DocumentRouter(inner, document_processor),
             send=rich_send,
             answer_callback=answer_callback,
             notify_admin=cast(OnboardingNotifyAdmin, notify_admin),
@@ -382,6 +394,19 @@ class TestableEchoProcessor:
         if delay_seconds > 0:
             await asyncio.sleep(delay_seconds)
         return text if isinstance(text, str) else None
+
+
+class DocumentRouter:
+    """Route active-user document jobs without changing the agent processor."""
+
+    def __init__(self, inner: ContextualProcessor, documents: PdfIngestProcessor) -> None:
+        self._inner = inner
+        self._documents = documents
+
+    async def process(self, envelope: UpdateEnvelope, context: TaskContext) -> str | None:
+        if envelope.kind == "document":
+            return await self._documents.process(envelope, context)
+        return await self._inner.process(envelope, context)
 
 
 class _TraceIdFilter(logging.Filter):

@@ -124,7 +124,8 @@ async def handle_update(
         )
         return
 
-    await enqueue_func(queue_redis, "interactive", envelope)
+    queue: QueueName = "background" if envelope.kind == "document" else "interactive"
+    await enqueue_func(queue_redis, queue, envelope)
     await cache_redis.set(dedup_key, "1", nx=True, ex=DEDUP_TTL_SECONDS)
 
 

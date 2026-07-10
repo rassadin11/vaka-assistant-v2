@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Buffer, Callable, Sequence
+from io import BytesIO
 from typing import Protocol
 
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
@@ -18,6 +19,7 @@ from aiogram.types import (
 )
 
 MAX_TELEGRAM_MESSAGE_CHARS = 4096
+MAX_TELEGRAM_DOWNLOAD_BYTES = 20 * 1024 * 1024
 
 LOGGER = logging.getLogger(__name__)
 
@@ -55,6 +57,20 @@ class TelegramBot(Protocol):
 
     def answer_callback_query(self, callback_query_id: str) -> Awaitable[object]:
         """Answer a callback query."""
+        ...
+
+    def get_file(self, file_id: str) -> Awaitable[object]:
+        """Resolve a Telegram file id to its remote path."""
+        ...
+
+    def download_file(
+        self,
+        file_path: str,
+        destination: BytesIO,
+        *,
+        timeout: int = 30,
+    ) -> Awaitable[object]:
+        """Download a file into the supplied byte stream."""
         ...
 
 
@@ -156,6 +172,20 @@ class TelegramSender:
                 self._logger.warning("telegram photo send failed: %s", exc)
                 raise
 
+    async def download_file(self, file_id: str, max_bytes: int) -> bytes:
+        """Download a Telegram file while enforcing the 20 MiB ingest ceiling."""
+
+        if max_bytes < 0:
+            raise ValueError("max_bytes must not be negative")
+        limit = min(max_bytes, MAX_TELEGRAM_DOWNLOAD_BYTES)
+        file = await self._bot.get_file(file_id)
+        file_path = getattr(file, "file_path", None)
+        if not isinstance(file_path, str) or file_path == "":
+            raise ValueError("Telegram getFile response has no file path")
+        destination = _LimitedBytesIO(limit)
+        await self._bot.download_file(file_path, destination, timeout=30)
+        return destination.getvalue()
+
     async def answer_callback_query(self, callback_query_id: str) -> None:
         """Answer a Telegram callback query without retrying API failures."""
 
@@ -229,3 +259,16 @@ def split_telegram_text(text: str) -> list[str]:
             remaining = remaining[1:]
     chunks.append(remaining)
     return chunks
+
+
+class _LimitedBytesIO(BytesIO):
+    """A write sink that stops aiogram downloads before they exceed a byte cap."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__()
+        self._limit = limit
+
+    def write(self, data: Buffer) -> int:
+        if self.tell() + len(memoryview(data)) > self._limit:
+            raise ValueError("Telegram file exceeds the configured download limit")
+        return super().write(data)
