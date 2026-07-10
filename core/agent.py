@@ -14,7 +14,7 @@ from typing import Literal
 
 from core.context import TaskContext
 from core.llm import LLMMessage, LLMProvider
-from core.tools_dispatch import ToolDispatcher, ToolDispatchError
+from core.tools_dispatch import MalformedToolCallError, ToolDispatcher, ToolDispatchError
 
 Clock = Callable[[], float]
 Sleep = Callable[[float], Awaitable[None]]
@@ -24,6 +24,9 @@ TOOL_LIMIT_TEXT = "Задача оказалась слишком сложной
 TIMEOUT_TEXT = "Не успел закончить — попробуйте ещё раз или упростите запрос."
 BUDGET_TEXT = (
     "Задача вышла слишком дорогой — остановил выполнение. Попробуйте сформулировать проще."
+)
+MALFORMED_TEXT = (
+    "Не получилось корректно обратиться к инструментам — попробуйте переформулировать запрос."
 )
 
 
@@ -54,7 +57,7 @@ class AgentResult:
     """The final output and accounting for an agent task."""
 
     text: str
-    stop_reason: Literal["answer", "tool_limit", "timeout", "budget"]
+    stop_reason: Literal["answer", "tool_limit", "timeout", "budget", "malformed"]
     total_cost_usd: Decimal
     llm_calls: int
     tool_calls: int
@@ -119,6 +122,7 @@ class AgentLoop:
         total_cost_usd = Decimal(0)
         llm_calls = 0
         tool_calls = 0
+        malformed_rounds = 0
         definitions = self._dispatcher.definitions()
         while True:
             response = await self._llm.generate(messages, tools=definitions)
@@ -147,10 +151,16 @@ class AgentLoop:
                 )
 
             messages.append(assistant)
+            malformed_in_round = False
             for tool_call in tool_requests:
                 active_tool_name[0] = tool_call.name
                 try:
                     result_content = await self._dispatcher.dispatch(tool_call, context)
+                except MalformedToolCallError as exc:
+                    result_content = f"Ошибка инструмента: {exc}"
+                    if not malformed_in_round:
+                        malformed_rounds += 1
+                        malformed_in_round = True
                 except ToolDispatchError as exc:
                     result_content = f"Ошибка инструмента: {exc}"
                 messages.append(
@@ -158,6 +168,14 @@ class AgentLoop:
                 )
                 tool_calls += 1
                 active_tool_name[0] = None
+                if malformed_rounds == 3:
+                    return AgentResult(
+                        MALFORMED_TEXT,
+                        "malformed",
+                        total_cost_usd,
+                        llm_calls,
+                        tool_calls,
+                    )
 
     async def _notify_progress_when_due(
         self,
