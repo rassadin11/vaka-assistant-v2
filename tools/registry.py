@@ -1,0 +1,57 @@
+"""Stage-4 tool registrations kept separate from the registry infrastructure."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from core.context import TaskContext
+from core.tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
+from tools.clock import get_current_time
+
+
+class EmptyArgs(BaseModel):
+    """Arguments for a tool which takes no model-controlled values."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class EchoConfirmArgs(BaseModel):
+    """Test-only external action arguments used by confirmation coverage."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    text: str = Field(max_length=500)
+
+
+async def _current_time(context: TaskContext, _args: BaseModel) -> ToolResult:
+    return ToolResult(status="ok", payload={"time": await get_current_time(context)})
+
+
+async def _echo_confirm(_context: TaskContext, args: BaseModel) -> ToolResult:
+    """A test-only safe stand-in for an external action."""
+
+    return ToolResult(status="ok", payload={"echo": args.model_dump()["text"]})
+
+
+def register_builtin_tools(registry: ToolRegistry) -> None:
+    """Register the intentionally small stage-4 baseline in stable order."""
+
+    registry.register(
+        ToolSpec(
+            name="get_current_time",
+            description="Get the current date and time in the user's timezone.",
+            args_schema=EmptyArgs,
+            risk=RiskLevel.READ_ONLY,
+            handler=_current_time,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="echo_confirm_test_only",
+            description="Test-only external echo action used to verify confirmation delivery.",
+            args_schema=EchoConfirmArgs,
+            risk=RiskLevel.MUTATING_EXTERNAL,
+            handler=_echo_confirm,
+            daily_limit=20,
+        )
+    )

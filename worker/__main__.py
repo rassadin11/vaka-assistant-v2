@@ -31,13 +31,15 @@ from core.llm_openrouter import OpenRouterProvider, openrouter_settings_from_env
 from core.llm_resilient import ResilientLLMProvider
 from core.model_router import RouteRequest, StaticModelRouter
 from core.queue import redis_settings_from_env
+from core.registry_dispatcher import RegistryToolDispatcher
 from core.secrets import EnvSecretsProvider, SecretNotFoundError
 from core.telegram_sender import TelegramSender
-from core.tools_dispatch import StaticToolDispatcher
-from tools.clock import GET_CURRENT_TIME_DEFINITION, get_current_time
+from core.tools import ToolRegistry
+from tools.registry import register_builtin_tools
 from worker.agent_processor import AgentProcessor
 from worker.app import NotifyAdminCallback, SendReplyCallback, SendTypingCallback, Worker
 from worker.config import config_from_env
+from worker.confirmations import ConfirmationProcessor
 from worker.onboarding import (
     AnswerCallback,
     OnboardingProcessor,
@@ -46,6 +48,7 @@ from worker.onboarding import (
 from worker.onboarding import (
     NotifyAdmin as OnboardingNotifyAdmin,
 )
+from worker.outbox import OutboxProcessor
 from worker.processor import EchoProcessor, Processor
 
 ButtonRows = list[list[tuple[str, str]]]
@@ -110,13 +113,22 @@ async def _run() -> None:
         rich_send = _rich_send_adapter(sender)
         answer_callback = sender.answer_callback_query
     processor: Processor
+    outbox_processor: OutboxProcessor | None = None
     if plain_echo:
         processor = TestableEchoProcessor()
         logging.getLogger(__name__).info("inner processor active: plain echo")
     else:
         if service_pool is None or app_pool is None:
             raise RuntimeError("database pools are required outside WORKER_PLAIN_ECHO mode")
-        inner = _active_inner_processor(queue_redis, app_pool, send_reply, notify_admin)
+        registry = ToolRegistry(queue_redis, app_pool, send_confirmation=rich_send)
+        register_builtin_tools(registry)
+        inner = _active_inner_processor(queue_redis, app_pool, send_reply, notify_admin, registry)
+        confirmation_handler = ConfirmationProcessor(
+            queue_redis,
+            app_pool,
+            send_reply=send_reply,
+        )
+        outbox_processor = OutboxProcessor(service_pool, registry, send_reply=send_reply)
         processor = OnboardingProcessor(
             service_pool=service_pool,
             cache_redis=cache_redis,
@@ -125,6 +137,7 @@ async def _run() -> None:
             answer_callback=answer_callback,
             notify_admin=cast(OnboardingNotifyAdmin, notify_admin),
             admin_ids=admin_ids,
+            confirmation_handler=confirmation_handler,
         )
     worker = Worker(
         queue_redis=queue_redis,
@@ -136,11 +149,18 @@ async def _run() -> None:
         config=config,
     )
     _install_signal_handlers(worker)
+    outbox_task = (
+        asyncio.create_task(outbox_processor.run()) if outbox_processor is not None else None
+    )
     try:
         await worker.run()
     except KeyboardInterrupt:
         worker.request_stop()
     finally:
+        if outbox_processor is not None:
+            outbox_processor.request_stop()
+        if outbox_task is not None:
+            await outbox_task
         await queue_redis.aclose()
         await cache_redis.aclose()
         if service_pool is not None:
@@ -261,6 +281,7 @@ def _active_inner_processor(
     app_pool: asyncpg.Pool,
     send_reply: SendReplyCallback,
     notify_admin: NotifyAdminCallback,
+    registry: ToolRegistry,
 ) -> AgentProcessor | EchoProcessor:
     """Choose the production agent only when its API key can be resolved."""
 
@@ -273,10 +294,7 @@ def _active_inner_processor(
         logging.getLogger(__name__).info("inner processor active: echo (empty OpenRouter key)")
         return EchoProcessor()
 
-    dispatcher = StaticToolDispatcher(
-        [GET_CURRENT_TIME_DEFINITION],
-        {"get_current_time": get_current_time},
-    )
+    dispatcher = RegistryToolDispatcher(registry)
     settings = openrouter_settings_from_env()
     route = StaticModelRouter(settings.model).route(
         RouteRequest(task_type="interactive", user_plan="standard")

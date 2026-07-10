@@ -77,7 +77,9 @@ async def test_timeout_retains_usage_recorded_before_a_hanging_call() -> None:
         user_id=UUID("018f0000-0000-7000-8000-000000000001"),
         tg_user_id=100,
         chat_id=500,
+        update_id=1,
         timezone="Europe/Moscow",
+        plan="trial",
         trace_id=UUID("018f0000-0000-7000-8000-000000000002"),
     )
 

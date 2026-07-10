@@ -139,6 +139,12 @@ class NotifyAdmin(Protocol):
     def __call__(self, text: str) -> Awaitable[None]: ...
 
 
+class ConfirmationHandler(Protocol):
+    """Handle confirmation callbacks after the active user has been resolved."""
+
+    async def process(self, envelope: UpdateEnvelope, context: TaskContext) -> str | None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class UserRow:
     """Resolved Telegram user state."""
@@ -148,6 +154,7 @@ class UserRow:
     tg_chat_id: int
     status: str
     timezone: str
+    plan: str
 
 
 class OnboardingProcessor:
@@ -163,6 +170,7 @@ class OnboardingProcessor:
         answer_callback: AnswerCallback,
         notify_admin: NotifyAdmin,
         admin_ids: tuple[int, ...],
+        confirmation_handler: ConfirmationHandler | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._service_pool = service_pool
@@ -172,6 +180,7 @@ class OnboardingProcessor:
         self._answer_callback = answer_callback
         self._notify_admin = notify_admin
         self._admin_ids = frozenset(admin_ids)
+        self._confirmation_handler = confirmation_handler
         self._logger = logger if logger is not None else LOGGER
 
     async def process(self, envelope: UpdateEnvelope) -> str | None:
@@ -300,7 +309,7 @@ class OnboardingProcessor:
         async with service_transaction(self._service_pool) as connection:
             row = await connection.fetchrow(
                 """
-                SELECT id, tg_user_id, tg_chat_id, status, timezone
+                SELECT id, tg_user_id, tg_chat_id, status, timezone, plan
                 FROM users
                 WHERE tg_user_id = $1
                 """,
@@ -314,6 +323,7 @@ class OnboardingProcessor:
             tg_chat_id=row["tg_chat_id"],
             status=row["status"],
             timezone=row["timezone"],
+            plan=row["plan"],
         )
 
     async def _create_pending_user(self, envelope: UpdateEnvelope) -> None:
@@ -355,7 +365,23 @@ class OnboardingProcessor:
         text: str | None,
         user: UserRow,
     ) -> str | None:
+        context = TaskContext(
+            user_id=user.id,
+            tg_user_id=user.tg_user_id,
+            chat_id=user.tg_chat_id,
+            update_id=envelope.update_id,
+            timezone=user.timezone,
+            plan=user.plan,
+            trace_id=envelope.trace_id,
+        )
         data = envelope.payload.get("data")
+        if (
+            envelope.kind == "callback"
+            and isinstance(data, str)
+            and data.startswith(("confirm:", "cancel:"))
+            and self._confirmation_handler is not None
+        ):
+            return await self._confirmation_handler.process(envelope, context)
         if envelope.kind == "callback" and isinstance(data, str) and data.startswith("tz:"):
             return await self._process_timezone_callback(envelope, data)
 
@@ -366,16 +392,7 @@ class OnboardingProcessor:
             return HELP_TEXT
         if text == "/start":
             return ALREADY_ACTIVE_TEXT
-        return await self._inner.process(
-            envelope,
-            TaskContext(
-                user_id=user.id,
-                tg_user_id=user.tg_user_id,
-                chat_id=user.tg_chat_id,
-                timezone=user.timezone,
-                trace_id=envelope.trace_id,
-            ),
-        )
+        return await self._inner.process(envelope, context)
 
     async def _process_timezone_callback(self, envelope: UpdateEnvelope, data: str) -> str | None:
         timezone = data.removeprefix("tz:")

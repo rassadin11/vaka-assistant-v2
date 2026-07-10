@@ -89,6 +89,7 @@ class FakePool:
             "first_name": first_name,
             "status": status,
             "timezone": timezone,
+            "plan": "trial",
             "created_at": datetime(2026, 7, 9, 12, 0, tzinfo=UTC),
             "updated_at": datetime(2026, 7, 9, 12, 0, tzinfo=UTC),
         }
@@ -121,6 +122,7 @@ class FakeConnection:
             "tg_chat_id": row["tg_chat_id"],
             "status": row["status"],
             "timezone": row["timezone"],
+            "plan": row["plan"],
         }
 
     async def fetch(self, query: str, *args: object) -> list[dict[str, Any]]:
@@ -142,6 +144,7 @@ class FakeConnection:
                 "first_name": None,
                 "status": "pending",
                 "timezone": timezone,
+                "plan": "trial",
                 "created_at": datetime.now(UTC),
                 "updated_at": datetime.now(UTC),
             }
@@ -382,6 +385,8 @@ async def test_active_user_context_uses_the_already_resolved_user_row() -> None:
         user_id=pool.users[101]["id"],
         tg_user_id=101,
         chat_id=501,
+        update_id=envelope.update_id,
         timezone="Asia/Almaty",
+        plan="trial",
         trace_id=envelope.trace_id,
     )

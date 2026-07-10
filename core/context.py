@@ -13,5 +13,7 @@ class TaskContext:
     user_id: UUID
     tg_user_id: int
     chat_id: int
+    update_id: int
     timezone: str
+    plan: str
     trace_id: UUID

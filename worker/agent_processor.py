@@ -67,7 +67,7 @@ class AgentProcessor:
 
         history = await load_dialog(self._app_pool, context.user_id)
         built = build_context(
-            _dynamics(context.timezone),
+            _dynamics(context.timezone, context.plan),
             facts=(),
             summary=history.summary,
             tail=to_llm_messages(history.tail),
@@ -147,13 +147,13 @@ class AgentProcessor:
             self._logger.exception("dialogue summarization failed")
 
 
-def _dynamics(timezone: str) -> UserDynamics:
+def _dynamics(timezone: str, plan: str) -> UserDynamics:
     current = datetime.now(ZoneInfo(timezone))
     return UserDynamics(
         current_time=current.isoformat(),
         weekday=current.strftime("%A"),
         timezone=timezone,
-        plan="standard",
+        plan=plan,
     )
 
 
