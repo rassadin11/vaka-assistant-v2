@@ -1,5 +1,7 @@
 """Unit tests for closed-beta onboarding behavior."""
 
+# ruff: noqa: RUF001
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -196,6 +198,7 @@ class Recorder:
         self.sent: list[tuple[int, str, list[list[tuple[str, str]]] | None]] = []
         self.callbacks: list[str] = []
         self.admin: list[str] = []
+        self.notify_admin_error: Exception | None = None
 
     async def send(
         self,
@@ -210,6 +213,8 @@ class Recorder:
 
     async def notify_admin(self, text: str) -> None:
         self.admin.append(text)
+        if self.notify_admin_error is not None:
+            raise self.notify_admin_error
 
 
 class ContextRecorder:
@@ -361,6 +366,84 @@ async def test_active_help_start_and_passthrough_to_inner_echo() -> None:
     assert await processor.process(_envelope(tg_user_id=101, text="/help")) == HELP_TEXT
     assert await processor.process(_envelope(tg_user_id=101, text="/start")) == ALREADY_ACTIVE_TEXT
     assert await processor.process(_envelope(tg_user_id=101, text="echo")) == "echo"
+    assert HELP_TEXT == (
+        "Я персональный ассистент. Что умею:\n"
+        "• вести учёт расходов и бюджеты — «потратил 750 на обед», «сколько я трачу на еду?»\n"
+        "• напоминать о делах — «напомни завтра в 10 позвонить маме»\n"
+        "• искать в интернете — «что нового у Яндекса? поищи»\n"
+        "• разбирать PDF-документы — пришлите файл и спрашивайте по содержимому\n"
+        "• запоминать важное — «запомни: у меня аллергия на арахис»\n\n"
+        "Пишите как удобно, своими словами — я пойму. Я в бете и учусь: если что-то пойдёт не так, "
+        "напишите /feedback <текст> — прочитаю и исправлюсь."
+    )
+    assert WELCOME_TEXT == "Часовой пояс сохранён: {tz}.\n\n" + HELP_TEXT
+
+
+async def test_active_feedback_notifies_admin_and_confirms_user() -> None:
+    pool = FakePool()
+    cache = FakeCache()
+    recorder = Recorder()
+    processor = _processor(pool, cache, recorder)
+    pool.add_user(101, status="active")
+
+    reply = await processor.process(_envelope(tg_user_id=101, text="/feedback\nОчень полезно"))
+
+    assert reply == "Спасибо! Передал команде — это помогает делать ассистента лучше."
+    assert recorder.admin == ["Отзыв от 101: Очень полезно"]
+
+
+async def test_active_feedback_without_text_returns_hint_without_notification() -> None:
+    pool = FakePool()
+    cache = FakeCache()
+    recorder = Recorder()
+    processor = _processor(pool, cache, recorder)
+    pool.add_user(101, status="active")
+
+    reply = await processor.process(_envelope(tg_user_id=101, text="/feedback   \n\t"))
+
+    assert reply == "Напишите отзыв одним сообщением: /feedback <текст>"
+    assert recorder.admin == []
+
+
+async def test_active_feedback_truncates_admin_notification_text() -> None:
+    pool = FakePool()
+    cache = FakeCache()
+    recorder = Recorder()
+    processor = _processor(pool, cache, recorder)
+    pool.add_user(101, status="active")
+    feedback = "a" * 1001
+
+    reply = await processor.process(_envelope(tg_user_id=101, text=f"/feedback {feedback}"))
+
+    assert reply == "Спасибо! Передал команде — это помогает делать ассистента лучше."
+    assert recorder.admin == [f"Отзыв от 101: {'a' * 1000}"]
+
+
+async def test_active_feedback_confirms_user_when_admin_notification_fails() -> None:
+    pool = FakePool()
+    cache = FakeCache()
+    recorder = Recorder()
+    recorder.notify_admin_error = RuntimeError("admin unavailable")
+    processor = _processor(pool, cache, recorder)
+    pool.add_user(101, status="active")
+
+    reply = await processor.process(_envelope(tg_user_id=101, text="/feedback Тест"))
+
+    assert reply == "Спасибо! Передал команде — это помогает делать ассистента лучше."
+    assert recorder.admin == ["Отзыв от 101: Тест"]
+
+
+async def test_pending_feedback_uses_normal_application_path() -> None:
+    pool = FakePool()
+    cache = FakeCache()
+    recorder = Recorder()
+    processor = _processor(pool, cache, recorder)
+    pool.add_user(101, status="pending")
+
+    reply = await processor.process(_envelope(tg_user_id=101, text="/feedback Тест"))
+
+    assert reply == PENDING_REPEAT_TEXT
+    assert recorder.admin == []
 
 
 async def test_active_user_context_uses_the_already_resolved_user_row() -> None:

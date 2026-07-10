@@ -29,26 +29,21 @@ TIMEZONE_PROMPT_TEXT = (
     "Доступ открыт! Чтобы напоминания приходили вовремя, выберите ваш город — "
     "так я узнаю часовой пояс:"
 )
-WELCOME_TEXT = (
-    "Часовой пояс сохранён: {tz}.\n\n"
+ASSISTANT_CAPABILITIES_TEXT = (
     "Я персональный ассистент. Что умею:\n"
-    "• вести учёт расходов — «потратил 750 на обед»\n"
+    "• вести учёт расходов и бюджеты — «потратил 750 на обед», «сколько я трачу на еду?»\n"
     "• напоминать о делах — «напомни завтра в 10 позвонить маме»\n"
-    "• искать в интернете — «что открыто в Питере в понедельник вечером?»\n"
-    "• разбирать документы — пришлите PDF и спросите по содержимому\n"
-    "• работать с почтой и календарём (после подключения Google)\n\n"
-    "Пока я в бете и учусь — если что-то пойдёт не так, напишите /feedback."
+    "• искать в интернете — «что нового у Яндекса? поищи»\n"
+    "• разбирать PDF-документы — пришлите файл и спрашивайте по содержимому\n"
+    "• запоминать важное — «запомни: у меня аллергия на арахис»\n\n"
+    "Пишите как удобно, своими словами — я пойму. Я в бете и учусь: если что-то пойдёт не так, "
+    "напишите /feedback <текст> — прочитаю и исправлюсь."
 )
-HELP_TEXT = (
-    "Я персональный ассистент. Что умею:\n"
-    "• вести учёт расходов — «потратил 750 на обед»\n"
-    "• напоминать о делах — «напомни завтра в 10 позвонить маме»\n"
-    "• искать в интернете — «что открыто в Питере в понедельник вечером?»\n"
-    "• разбирать документы — пришлите PDF и спросите по содержимому\n"
-    "• работать с почтой и календарём (после подключения Google)\n\n"
-    "Пока я в бете и учусь — если что-то пойдёт не так, напишите /feedback."
-)
+WELCOME_TEXT = "Часовой пояс сохранён: {tz}.\n\n" + ASSISTANT_CAPABILITIES_TEXT
+HELP_TEXT = ASSISTANT_CAPABILITIES_TEXT
 ALREADY_ACTIVE_TEXT = "Вы уже в деле! Команда /help напомнит, что я умею."
+FEEDBACK_CONFIRMATION_TEXT = "Спасибо! Передал команде — это помогает делать ассистента лучше."
+FEEDBACK_HINT_TEXT = "Напишите отзыв одним сообщением: /feedback <текст>"
 ADMIN_NEW_APPLICATION_TEXT = (
     "Новая заявка: id {tg_user_id}. /approve {tg_user_id} или /reject {tg_user_id}"
 )
@@ -392,6 +387,15 @@ class OnboardingProcessor:
             return HELP_TEXT
         if text == "/start":
             return ALREADY_ACTIVE_TEXT
+        feedback = _feedback_text(text) if text is not None else None
+        if feedback is not None:
+            if feedback == "":
+                return FEEDBACK_HINT_TEXT
+            try:
+                await self._notify_admin(f"Отзыв от {envelope.user_id}: {feedback[:1000]}")
+            except Exception:
+                self._logger.warning("feedback notification failed", exc_info=True)
+            return FEEDBACK_CONFIRMATION_TEXT
         return await self._inner.process(envelope, context)
 
     async def _process_timezone_callback(self, envelope: UpdateEnvelope, data: str) -> str | None:
@@ -427,6 +431,17 @@ class OnboardingProcessor:
 def _payload_text(envelope: UpdateEnvelope) -> str | None:
     text = envelope.payload.get("text")
     return text if isinstance(text, str) else None
+
+
+def _feedback_text(text: str) -> str | None:
+    if text == "/feedback":
+        return ""
+    if not text.startswith("/feedback"):
+        return None
+    suffix = text.removeprefix("/feedback")
+    if suffix == "" or not suffix[0].isspace():
+        return None
+    return suffix.strip()
 
 
 def _parse_tg_user_id(raw_value: str) -> int | None:
