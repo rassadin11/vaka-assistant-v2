@@ -17,6 +17,7 @@ from core.context import TaskContext
 from core.db import service_transaction, user_transaction
 from core.queue import DEFAULT_REDIS_QUEUE_URL
 from core.tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
+from tools.finance import register_finance_tools
 
 pytestmark = pytest.mark.integration
 
@@ -170,4 +171,74 @@ async def test_tool_log_rls_and_service_outbox_access(
         assert other_logs == []
         assert outbox is not None and outbox["user_id"] == user_a
     finally:
+        await _remove_users(service_pool, user_a, user_b)
+
+
+async def test_finance_tools_use_rls_upsert_budgets_and_moscow_day_bounds(
+    queue_redis: Redis,
+    app_pool: asyncpg.Pool,
+    service_pool: asyncpg.Pool,
+) -> None:
+    user_a = uuid4()
+    user_b = uuid4()
+    registry = ToolRegistry(queue_redis, app_pool)
+    register_finance_tools(registry, app_pool, None)
+    context_a = _context(user_a, update_id=730)
+    context_b = _context(user_b, update_id=740)
+    await _create_user(service_pool, user_a)
+    await _create_user(service_pool, user_b)
+    try:
+        first_budget = await registry.dispatch(
+            context_a,
+            "set_budget",
+            {"category": "food", "monthly_limit": 100},
+            1,
+        )
+        updated_budget = await registry.dispatch(
+            context_a,
+            "set_budget",
+            {"category": "food", "monthly_limit": 200},
+            2,
+        )
+        transaction = await registry.dispatch(
+            context_a,
+            "add_transaction",
+            {
+                "amount": 50,
+                "direction": "expense",
+                "category": "food",
+                "ts": "2026-07-01T00:30:00+03:00",
+            },
+            3,
+        )
+        own_query = await registry.dispatch(
+            context_a,
+            "query_transactions",
+            {"period_start": "2026-07-01", "period_end": "2026-07-01", "group_by": "day"},
+            4,
+        )
+        other_query = await registry.dispatch(
+            context_b,
+            "query_transactions",
+            {"period_start": "2026-07-01", "period_end": "2026-07-01", "group_by": "day"},
+            1,
+        )
+        async with user_transaction(app_pool, user_b) as connection:
+            foreign_rows = await connection.fetch("SELECT id FROM transactions")
+        async with service_transaction(service_pool) as connection:
+            budget_count = await connection.fetchval(
+                "SELECT count(*) FROM budgets WHERE user_id = $1 AND category = 'food'", user_a
+            )
+
+        assert first_budget.status == updated_budget.status == transaction.status == "ok"
+        assert budget_count == 1
+        assert own_query.payload["rows"] == [{"total": "50.00", "day": "2026-07-01"}]
+        assert other_query.payload["rows"] == []
+        assert foreign_rows == []
+    finally:
+        await queue_redis.delete(
+            "idem:730:1",
+            "idem:730:2",
+            "idem:730:3",
+        )
         await _remove_users(service_pool, user_a, user_b)

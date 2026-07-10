@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncpg
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.context import TaskContext
 from core.tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
 from tools.clock import get_current_time
+from tools.finance import SendPhoto, register_finance_tools
 
 
 class EmptyArgs(BaseModel):
@@ -33,7 +35,11 @@ async def _echo_confirm(_context: TaskContext, args: BaseModel) -> ToolResult:
     return ToolResult(status="ok", payload={"echo": args.model_dump()["text"]})
 
 
-def register_builtin_tools(registry: ToolRegistry) -> None:
+def register_builtin_tools(
+    registry: ToolRegistry,
+    app_pool: asyncpg.Pool | None = None,
+    send_photo: SendPhoto | None = None,
+) -> None:
     """Register the intentionally small stage-4 baseline in stable order."""
 
     registry.register(
@@ -45,6 +51,8 @@ def register_builtin_tools(registry: ToolRegistry) -> None:
             handler=_current_time,
         )
     )
+    if app_pool is not None:
+        register_finance_tools(registry, app_pool, send_photo)
     registry.register(
         ToolSpec(
             name="echo_confirm_test_only",

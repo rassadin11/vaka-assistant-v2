@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import signal
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import NoReturn, cast
 
@@ -53,6 +54,7 @@ from worker.processor import EchoProcessor, Processor
 
 ButtonRows = list[list[tuple[str, str]]]
 RichSendCallback = SendCallback
+type SendPhotoCallback = Callable[[int, bytes, str | None], Awaitable[None]]
 
 
 def main() -> NoReturn:
@@ -91,18 +93,21 @@ async def _run() -> None:
     send_typing: SendTypingCallback
     notify_admin: NotifyAdminCallback
     rich_send: RichSendCallback
+    send_photo: SendPhotoCallback
     answer_callback: AnswerCallback
     if reply_stream is not None:
         send_reply = _stream_reply(queue_redis, reply_stream)
         send_typing = _log_typing
         notify_admin = _stream_admin(queue_redis, reply_stream)
         rich_send = _rich_send_from_reply(send_reply)
+        send_photo = _noop_photo
         answer_callback = _log_callback_answer
     elif token is None:
         send_reply = _log_reply
         send_typing = _log_typing
         notify_admin = _log_admin
         rich_send = _log_rich_send
+        send_photo = _noop_photo
         answer_callback = _log_callback_answer
     else:
         bot = Bot(token)
@@ -111,6 +116,7 @@ async def _run() -> None:
         send_typing = sender.send_typing
         notify_admin = sender.notify_admins
         rich_send = _rich_send_adapter(sender)
+        send_photo = sender.send_photo
         answer_callback = sender.answer_callback_query
     processor: Processor
     outbox_processor: OutboxProcessor | None = None
@@ -121,7 +127,7 @@ async def _run() -> None:
         if service_pool is None or app_pool is None:
             raise RuntimeError("database pools are required outside WORKER_PLAIN_ECHO mode")
         registry = ToolRegistry(queue_redis, app_pool, send_confirmation=rich_send)
-        register_builtin_tools(registry)
+        register_builtin_tools(registry, app_pool, send_photo)
         inner = _active_inner_processor(queue_redis, app_pool, send_reply, notify_admin, registry)
         confirmation_handler = ConfirmationProcessor(
             queue_redis,
@@ -253,6 +259,10 @@ async def _log_rich_send(chat_id: int, text: str, buttons: ButtonRows | None = N
 
 async def _log_callback_answer(callback_query_id: str) -> None:
     logging.getLogger(__name__).info("answer callback_query_id=%s", callback_query_id)
+
+
+async def _noop_photo(_chat_id: int, _photo: bytes, _caption: str | None) -> None:
+    """Discard chart sends in worker modes without a Telegram sender."""
 
 
 def _stream_reply(redis: Redis, stream: str) -> SendReplyCallback:

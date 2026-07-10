@@ -9,7 +9,13 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Protocol
 
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
-from aiogram.types import ForceReply, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import (
+    BufferedInputFile,
+    ForceReply,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 
 MAX_TELEGRAM_MESSAGE_CHARS = 4096
 
@@ -35,6 +41,16 @@ class TelegramBot(Protocol):
 
     def send_chat_action(self, chat_id: int, action: str) -> Awaitable[object]:
         """Send a chat action."""
+        ...
+
+    def send_photo(
+        self,
+        chat_id: int | str,
+        photo: BufferedInputFile,
+        *,
+        caption: str | None = None,
+    ) -> Awaitable[object]:
+        """Send a multipart photo."""
         ...
 
     def answer_callback_query(self, callback_query_id: str) -> Awaitable[object]:
@@ -116,6 +132,29 @@ class TelegramSender:
         for index, chunk in enumerate(chunks):
             chunk_markup = reply_markup if index == len(chunks) - 1 else None
             await self._send_message_chunk(chat_id, chunk, reply_markup=chunk_markup)
+
+    async def send_photo(self, chat_id: int, photo: bytes, caption: str | None = None) -> None:
+        """Send a PNG photo using the same pacing and 429 retry policy as messages."""
+
+        retries = 0
+        while True:
+            await self._limiter.wait(chat_id=chat_id, apply_per_chat=True)
+            try:
+                await self._bot.send_photo(
+                    chat_id=chat_id,
+                    photo=BufferedInputFile(photo, filename="finance.png"),
+                    caption=caption,
+                )
+                return
+            except TelegramRetryAfter as exc:
+                retries += 1
+                if retries > self._max_retries:
+                    self._logger.warning("telegram photo retry limit exceeded: %s", exc)
+                    raise
+                await self._sleep(float(exc.retry_after))
+            except TelegramAPIError as exc:
+                self._logger.warning("telegram photo send failed: %s", exc)
+                raise
 
     async def answer_callback_query(self, callback_query_id: str) -> None:
         """Answer a Telegram callback query without retrying API failures."""

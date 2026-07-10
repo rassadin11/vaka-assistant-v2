@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import pytest
 from aiogram.exceptions import TelegramRetryAfter
+from aiogram.types import BufferedInputFile
 
 from core.telegram_sender import SendRateLimiter, TelegramSender
 
@@ -29,6 +30,8 @@ class FakeBot:
         self.actions: list[tuple[int, str]] = []
         self.callback_answers: list[str] = []
         self.message_outcomes: list[object] = []
+        self.photos: list[tuple[int, BufferedInputFile, str | None]] = []
+        self.photo_outcomes: list[object] = []
 
     async def send_message(
         self,
@@ -46,6 +49,20 @@ class FakeBot:
 
     async def send_chat_action(self, chat_id: int, action: str) -> object:
         self.actions.append((chat_id, action))
+        return object()
+
+    async def send_photo(
+        self,
+        chat_id: int,
+        photo: BufferedInputFile,
+        caption: str | None = None,
+    ) -> object:
+        self.photos.append((chat_id, photo, caption))
+        if self.photo_outcomes:
+            outcome = self.photo_outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
         return object()
 
     async def answer_callback_query(self, callback_query_id: str) -> object:
@@ -86,6 +103,26 @@ async def test_sender_retries_telegram_429_retry_after() -> None:
     await sender.send_message(42, "hello")
 
     assert [text for _, text, _markup in bot.messages] == ["hello", "hello"]
+    assert clock.sleeps == [2.0]
+
+
+async def test_sender_sends_png_photo_with_same_429_retry_policy() -> None:
+    clock = FakeClock()
+    bot = FakeBot()
+    bot.photo_outcomes = [
+        TelegramRetryAfter(method=cast(Any, None), message="retry", retry_after=2),
+        object(),
+    ]
+    sender = TelegramSender(
+        bot, limiter=SendRateLimiter(clock=clock, sleep=clock.sleep), sleep=clock.sleep
+    )
+
+    await sender.send_photo(42, b"png", "chart")
+
+    assert [(chat_id, photo.data, caption) for chat_id, photo, caption in bot.photos] == [
+        (42, b"png", "chart"),
+        (42, b"png", "chart"),
+    ]
     assert clock.sleeps == [2.0]
 
 
