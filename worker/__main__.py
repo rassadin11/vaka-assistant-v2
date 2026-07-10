@@ -36,6 +36,7 @@ from core.model_router import RouteRequest, StaticModelRouter
 from core.queue import enqueue, redis_settings_from_env
 from core.registry_dispatcher import RegistryToolDispatcher
 from core.secrets import EnvSecretsProvider, SecretNotFoundError
+from core.stt import GroqSTTProvider, STTProvider
 from core.telegram_sender import TelegramSender
 from core.tools import ToolRegistry
 from tools.registry import register_builtin_tools
@@ -57,6 +58,7 @@ from worker.scheduler import SchedulerProcessor
 
 if TYPE_CHECKING:
     from worker.documents import PdfIngestProcessor
+    from worker.voice import VoiceProcessor
 
 ButtonRows = list[list[tuple[str, str]]]
 RichSendCallback = SendCallback
@@ -138,6 +140,7 @@ async def _run() -> None:
         logging.getLogger(__name__).info("inner processor active: plain echo")
     else:
         from worker.documents import PdfIngestProcessor
+        from worker.voice import VoiceProcessor
 
         if service_pool is None or app_pool is None:
             raise RuntimeError("database pools are required outside WORKER_PLAIN_ECHO mode")
@@ -154,6 +157,13 @@ async def _run() -> None:
             queue_redis, app_pool, send_reply, notify_admin, registry, embeddings
         )
         document_processor = PdfIngestProcessor(app_pool, queue_redis, download_file, embeddings)
+        voice_processor = VoiceProcessor(
+            app_pool,
+            queue_redis,
+            download_file,
+            _stt_provider_from_env(),
+            inner,
+        )
         confirmation_handler = ConfirmationProcessor(
             queue_redis,
             app_pool,
@@ -168,7 +178,7 @@ async def _run() -> None:
         processor = OnboardingProcessor(
             service_pool=service_pool,
             cache_redis=cache_redis,
-            inner=DocumentRouter(inner, document_processor),
+            inner=KindRouter(inner, document_processor, voice_processor),
             send=rich_send,
             answer_callback=answer_callback,
             notify_admin=cast(OnboardingNotifyAdmin, notify_admin),
@@ -386,6 +396,20 @@ def _embeddings_provider_from_env() -> EmbeddingsProvider | None:
     return HttpEmbeddingsProvider(url)
 
 
+def _stt_provider_from_env() -> STTProvider | None:
+    """Create Groq STT only when its API key is available and non-empty."""
+
+    try:
+        api_key = EnvSecretsProvider().get("GROQ_API_KEY")
+    except SecretNotFoundError:
+        logging.getLogger(__name__).info("voice STT disabled: no Groq key")
+        return None
+    if not api_key.strip():
+        logging.getLogger(__name__).info("voice STT disabled: empty Groq key")
+        return None
+    return GroqSTTProvider(api_key)
+
+
 class TestableEchoProcessor:
     """Plain echo processor with test-only poison and delay controls."""
 
@@ -400,16 +424,24 @@ class TestableEchoProcessor:
         return text if isinstance(text, str) else None
 
 
-class DocumentRouter:
-    """Route active-user document jobs without changing the agent processor."""
+class KindRouter:
+    """Route active-user document and voice jobs without changing the agent processor."""
 
-    def __init__(self, inner: ContextualProcessor, documents: PdfIngestProcessor) -> None:
+    def __init__(
+        self,
+        inner: ContextualProcessor,
+        documents: PdfIngestProcessor,
+        voice: VoiceProcessor,
+    ) -> None:
         self._inner = inner
         self._documents = documents
+        self._voice = voice
 
     async def process(self, envelope: UpdateEnvelope, context: TaskContext) -> str | None:
         if envelope.kind == "document":
             return await self._documents.process(envelope, context)
+        if envelope.kind == "voice":
+            return await self._voice.process(envelope, context)
         return await self._inner.process(envelope, context)
 
 

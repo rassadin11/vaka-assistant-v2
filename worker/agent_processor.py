@@ -104,8 +104,9 @@ class AgentProcessor:
             if not isinstance(title, str):
                 return UNSUPPORTED_CONTENT_TEXT
             reply_text = f"⏰ {title}:\n{result.text}"
+        user_meta = _voice_meta(envelope.payload)
         drafts = [
-            MessageDraft(role="user", content=text),
+            MessageDraft(role="user", content=text, meta=user_meta),
             *[_draft_from_message(message) for message in messages[initial_message_count:]],
             MessageDraft(
                 role="assistant",
@@ -193,6 +194,14 @@ def _queue_for_envelope(envelope: UpdateEnvelope) -> QueueName:
     if envelope.kind == "text":
         return "interactive"
     return "background"
+
+
+def _voice_meta(payload: dict[str, object]) -> dict[str, object] | None:
+    """Return storage metadata for a transcript that came from a voice message."""
+
+    if payload.get("modality") != "voice":
+        return None
+    return {"modality": "voice", "duration": payload.get("duration")}
 
 
 async def _load_memory_facts(
