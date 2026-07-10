@@ -23,7 +23,7 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from redis.asyncio import Redis
 
-from core.agent import AgentLoop, AgentLoopConfig
+from core.agent import AgentLoopConfig
 from core.config import admin_ids_from_env, optional_telegram_bot_token
 from core.db import create_pool, create_service_pool
 from core.envelope import UpdateEnvelope
@@ -301,9 +301,10 @@ def _active_inner_processor(
         notify_admin=notify_admin,
     )
     return AgentProcessor(
-        AgentLoop(provider, dispatcher, agent_config),
+        provider,
+        dispatcher,
+        agent_config,
         app_pool=app_pool,
-        summarizer=provider,
         send=send_reply,
     )
 
