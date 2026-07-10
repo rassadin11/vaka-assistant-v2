@@ -66,6 +66,7 @@ def test_oversized_tail_is_trimmed_oldest_first_by_whole_turn_groups() -> None:
 
     assert built.needs_summarization
     assert built.tail == [recent_user]
+    assert built.trimmed == [old_assistant, old_tool]
     assert all(message.role != "tool" for message in built.tail[:1])
 
 

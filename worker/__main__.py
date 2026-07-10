@@ -25,7 +25,7 @@ from redis.asyncio import Redis
 
 from core.agent import AgentLoop, AgentLoopConfig
 from core.config import admin_ids_from_env, optional_telegram_bot_token
-from core.db import create_service_pool
+from core.db import create_pool, create_service_pool
 from core.envelope import UpdateEnvelope
 from core.llm_openrouter import OpenRouterProvider, openrouter_settings_from_env
 from core.llm_resilient import ResilientLLMProvider
@@ -75,8 +75,10 @@ async def _run() -> None:
     admin_ids = admin_ids_from_env()
     plain_echo = _env_bool("WORKER_PLAIN_ECHO")
     service_pool: asyncpg.Pool | None = None
+    app_pool: asyncpg.Pool | None = None
     if not plain_echo:
         service_pool = await _create_service_pool_or_fail()
+        app_pool = await _create_app_pool_or_fail()
     queue_redis = Redis.from_url(settings.queue_url, decode_responses=True)
     cache_redis = Redis.from_url(settings.cache_url, decode_responses=True)
     bot: Bot | None = None
@@ -112,9 +114,9 @@ async def _run() -> None:
         processor = TestableEchoProcessor()
         logging.getLogger(__name__).info("inner processor active: plain echo")
     else:
-        if service_pool is None:
-            raise RuntimeError("service pool is required outside WORKER_PLAIN_ECHO mode")
-        inner = _active_inner_processor(queue_redis, send_reply, notify_admin)
+        if service_pool is None or app_pool is None:
+            raise RuntimeError("database pools are required outside WORKER_PLAIN_ECHO mode")
+        inner = _active_inner_processor(queue_redis, app_pool, send_reply, notify_admin)
         processor = OnboardingProcessor(
             service_pool=service_pool,
             cache_redis=cache_redis,
@@ -143,6 +145,8 @@ async def _run() -> None:
         await cache_redis.aclose()
         if service_pool is not None:
             await service_pool.close()
+        if app_pool is not None:
+            await app_pool.close()
         if bot is not None:
             await bot.session.close()
 
@@ -153,6 +157,17 @@ async def _create_service_pool_or_fail() -> asyncpg.Pool:
     except Exception:
         logging.getLogger(__name__).critical(
             "worker startup failed: Postgres service database is unreachable",
+            exc_info=True,
+        )
+        raise
+
+
+async def _create_app_pool_or_fail() -> asyncpg.Pool:
+    try:
+        return await create_pool()
+    except Exception:
+        logging.getLogger(__name__).critical(
+            "worker startup failed: Postgres application database is unreachable",
             exc_info=True,
         )
         raise
@@ -243,6 +258,7 @@ def _env_bool(name: str) -> bool:
 
 def _active_inner_processor(
     queue_redis: Redis,
+    app_pool: asyncpg.Pool,
     send_reply: SendReplyCallback,
     notify_admin: NotifyAdminCallback,
 ) -> AgentProcessor | EchoProcessor:
@@ -277,18 +293,17 @@ def _active_inner_processor(
         OpenRouterProvider(replace(settings, model=fallback_model)) if fallback_model else None
     )
     logging.getLogger(__name__).info("inner processor active: agent")
+    provider = ResilientLLMProvider(
+        OpenRouterProvider(settings),
+        queue_redis,
+        settings.model,
+        fallback_provider=fallback_provider,
+        notify_admin=notify_admin,
+    )
     return AgentProcessor(
-        AgentLoop(
-            ResilientLLMProvider(
-                OpenRouterProvider(settings),
-                queue_redis,
-                settings.model,
-                fallback_provider=fallback_provider,
-                notify_admin=notify_admin,
-            ),
-            dispatcher,
-            agent_config,
-        ),
+        AgentLoop(provider, dispatcher, agent_config),
+        app_pool=app_pool,
+        summarizer=provider,
         send=send_reply,
     )
 

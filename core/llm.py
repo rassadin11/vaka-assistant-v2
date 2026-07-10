@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any, Literal, Protocol
@@ -30,6 +31,19 @@ class LLMMessage(BaseModel):
     content: str | None = None
     tool_calls: list[LLMToolCall] | None = None
     tool_call_id: str | None = None
+
+
+def serialize_tool_calls(tool_calls: Sequence[LLMToolCall] | None) -> str | None:
+    """Return a canonical JSON representation suitable for storage and token counting."""
+
+    if not tool_calls:
+        return None
+    return json.dumps(
+        [call.model_dump(mode="json") for call in tool_calls],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 class ToolDefinition(BaseModel):

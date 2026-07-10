@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from core.llm import LLMMessage
+from core.llm import LLMMessage, serialize_tool_calls
 from core.prompt import STATIC_CORE
 from core.tokens import count_tokens, truncate_to_tokens
 
@@ -41,6 +40,7 @@ class BuiltContext:
 
     system_message: LLMMessage
     tail: list[LLMMessage]
+    trimmed: list[LLMMessage]
     needs_summarization: bool
 
 
@@ -58,7 +58,7 @@ def build_context(
     _require_within_budget("C", dynamics_block)
     facts_block = _fit_facts(facts)
     summary_block = _fit_summary(summary)
-    bounded_tail, needs_summarization = _fit_tail(tail)
+    bounded_tail, trimmed, needs_summarization = _fit_tail(tail)
 
     sections = [STATIC_CORE, _USER_DYNAMICS_HEADER, dynamics_block]
     if facts_block:
@@ -68,6 +68,7 @@ def build_context(
     return BuiltContext(
         system_message=LLMMessage(role="system", content="\n\n".join(sections)),
         tail=bounded_tail,
+        trimmed=trimmed,
         needs_summarization=needs_summarization,
     )
 
@@ -93,14 +94,16 @@ def _fit_summary(summary: SummaryContext | str | None) -> str:
     return truncate_to_tokens(text, BUDGETS["E"])
 
 
-def _fit_tail(tail: Sequence[LLMMessage]) -> tuple[list[LLMMessage], bool]:
+def _fit_tail(tail: Sequence[LLMMessage]) -> tuple[list[LLMMessage], list[LLMMessage], bool]:
     groups = _turn_groups(tail)
     total = sum(_message_tokens(message) for group in groups for message in group)
     needs_summarization = total > BUDGETS["F"]
+    trimmed: list[LLMMessage] = []
     while groups and total > BUDGETS["F"]:
         removed = groups.pop(0)
+        trimmed.extend(removed)
         total -= sum(_message_tokens(message) for message in removed)
-    return [message for group in groups for message in group], needs_summarization
+    return [message for group in groups for message in group], trimmed, needs_summarization
 
 
 def _turn_groups(messages: Sequence[LLMMessage]) -> list[list[LLMMessage]]:
@@ -109,6 +112,7 @@ def _turn_groups(messages: Sequence[LLMMessage]) -> list[list[LLMMessage]]:
     while index < len(messages):
         message = messages[index]
         if message.role == "tool":
+            groups.append([message])
             index += 1
             continue
         group = [message]
@@ -122,14 +126,7 @@ def _turn_groups(messages: Sequence[LLMMessage]) -> list[list[LLMMessage]]:
 
 
 def _message_tokens(message: LLMMessage) -> int:
-    serialized_calls = ""
-    if message.tool_calls:
-        serialized_calls = json.dumps(
-            [call.model_dump(mode="json") for call in message.tool_calls],
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+    serialized_calls = serialize_tool_calls(message.tool_calls) or ""
     return count_tokens("\n".join(part for part in (message.content, serialized_calls) if part))
 
 
