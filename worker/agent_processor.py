@@ -65,7 +65,7 @@ class AgentProcessor:
     async def process(self, envelope: UpdateEnvelope, context: TaskContext) -> str | None:
         """Process text, retaining the dialogue and relaying optional progress notifications."""
 
-        if envelope.kind != "text":
+        if envelope.kind not in {"text", "agent_task"}:
             return UNSUPPORTED_CONTENT_TEXT
         text = envelope.payload.get("text")
         if not isinstance(text, str):
@@ -98,12 +98,18 @@ class AgentProcessor:
             await self._send(context.chat_id, progress_text)
 
         result = await loop.run(messages, context, notify_progress=notify_progress)
+        reply_text = result.text
+        if envelope.kind == "agent_task":
+            title = envelope.payload.get("title")
+            if not isinstance(title, str):
+                return UNSUPPORTED_CONTENT_TEXT
+            reply_text = f"⏰ {title}:\n{result.text}"
         drafts = [
             MessageDraft(role="user", content=text),
             *[_draft_from_message(message) for message in messages[initial_message_count:]],
             MessageDraft(
                 role="assistant",
-                content=result.text,
+                content=reply_text,
                 meta={"prompt_version": PROMPT_VERSION, "stop_reason": result.stop_reason},
             ),
         ]
@@ -128,7 +134,7 @@ class AgentProcessor:
             )
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
-        return result.text
+        return reply_text
 
     async def _save_trimmed_summary(
         self,

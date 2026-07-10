@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -18,7 +19,14 @@ from tools.reminders import (
     _list_reminders,
     _repeat_for_cron,
 )
-from worker.scheduler import SchedulerProcessor
+from tools.scheduled import (
+    CancelScheduledTaskArgs,
+    ScheduleTaskArgs,
+    _cancel_scheduled_task,
+    _list_scheduled_tasks,
+    _schedule_task,
+)
+from worker.scheduler import SchedulerProcessor, agent_task_update_id
 
 
 class FakeTransaction:
@@ -59,10 +67,11 @@ class FakeConnection:
             return "SELECT 1"
         if "SET status = 'cancelled'" in query:
             reminder_id = int(args[0])
+            kind = "agent_task" if "agent_task" in query else "reminder"
             for task in self.tasks:
                 if (
                     task["id"] == reminder_id
-                    and task["kind"] == "reminder"
+                    and task["kind"] == kind
                     and task["status"] == "active"
                 ):
                     task["status"] = "cancelled"
@@ -79,14 +88,14 @@ class FakeConnection:
 
     async def fetchval(self, query: str, *args: object) -> object:
         if "COUNT(*)" in query:
-            return sum(
-                task["kind"] == "reminder" and task["status"] == "active" for task in self.tasks
-            )
+            kind = "agent_task" if "agent_task" in query else "reminder"
+            return sum(task["kind"] == kind and task["status"] == "active" for task in self.tasks)
         if "INSERT INTO scheduled_tasks" in query:
+            kind = "agent_task" if "agent_task" in query else "reminder"
             task = {
                 "id": self._next_id,
                 "user_id": args[0],
-                "kind": "reminder",
+                "kind": kind,
                 "title": args[1],
                 "payload": args[2],
                 "cron_expr": args[3],
@@ -107,16 +116,17 @@ class FakeConnection:
             return [
                 task.copy()
                 for task in self.tasks
-                if task["kind"] == "reminder"
+                if task["kind"] in {"reminder", "agent_task"}
                 and task["status"] == "active"
                 and task["next_run_at"] <= now
             ][:20]
         if "FROM scheduled_tasks" in query:
+            kind = "agent_task" if "agent_task" in query else "reminder"
             return [
                 task.copy()
                 for task in sorted(self.tasks, key=lambda value: value["next_run_at"])
-                if task["kind"] == "reminder" and task["status"] == "active"
-            ][:25]
+                if task["kind"] == kind and task["status"] == "active"
+            ][: 10 if kind == "agent_task" else 25]
         raise AssertionError(f"unexpected fetch: {query}")
 
     def _task(self, task_id: int) -> dict[str, Any]:
@@ -228,23 +238,35 @@ async def test_active_limit_cancel_and_list_reverse_cron_mapping() -> None:
     assert _repeat_for_cron("0 9 * * MON") == "cron"
 
 
-async def test_scheduler_delivers_one_off_and_ignores_agent_tasks() -> None:
+async def test_scheduler_delivers_one_off_and_enqueues_agent_tasks() -> None:
     pool = FakePool()
     pool.connection.tasks = [
         _task(1, "reminder", None),
-        _task(2, "agent_task", None),
+        _task(2, "agent_task", "0 9 * * *"),
     ]
+    agent_next_run = pool.connection.tasks[1]["next_run_at"]
     sent: list[str] = []
 
     async def sender(_chat_id: int, text: str) -> None:
         sent.append(text)
 
-    worked = await SchedulerProcessor(pool, send_reply=sender).run_once()
+    enqueued = []
+
+    async def enqueue_background(envelope: object) -> None:
+        enqueued.append(envelope)
+
+    worked = await SchedulerProcessor(
+        pool, send_reply=sender, enqueue_background=enqueue_background
+    ).run_once()
 
     assert worked is True
     assert sent == ["Напоминание: r1"]
     assert pool.connection.tasks[0]["status"] == "done"
     assert pool.connection.tasks[1]["status"] == "active"
+    envelope = enqueued[0]
+    assert envelope.kind == "agent_task"
+    assert envelope.payload == {"text": "r2", "scheduled_task_id": 2, "title": "task 2"}
+    assert envelope.update_id == agent_task_update_id(2, agent_next_run)
 
 
 async def test_scheduler_recurs_in_user_timezone_and_rolls_back_failed_send() -> None:
@@ -272,14 +294,101 @@ async def test_scheduler_recurs_in_user_timezone_and_rolls_back_failed_send() ->
     assert pool.connection.tasks[0]["status"] == "active"
 
 
+async def test_scheduler_rolls_back_agent_task_when_enqueue_fails() -> None:
+    pool = FakePool()
+    pool.connection.tasks = [_task(1, "agent_task", "0 9 * * *")]
+    before = pool.connection.tasks[0]["next_run_at"]
+
+    async def sender(_chat_id: int, _text: str) -> None:
+        return None
+
+    async def failing_enqueue(_envelope: object) -> None:
+        raise RuntimeError("redis unavailable")
+
+    with pytest.raises(RuntimeError, match="redis unavailable"):
+        await SchedulerProcessor(
+            pool, send_reply=sender, enqueue_background=failing_enqueue
+        ).run_once()
+    assert pool.connection.tasks[0]["next_run_at"] == before
+
+
 def _task(task_id: int, kind: str, cron_expr: str | None) -> dict[str, Any]:
     return {
         "id": task_id,
         "kind": kind,
+        "title": f"task {task_id}",
         "status": "active",
         "payload": f"r{task_id}",
         "cron_expr": cron_expr,
         "next_run_at": datetime.now(UTC) - timedelta(minutes=1),
         "tg_chat_id": 500,
+        "tg_user_id": 100,
         "timezone": "Europe/Moscow",
     }
+
+
+async def test_schedule_task_validates_cron_and_active_limit() -> None:
+    pool = FakePool()
+    broken = await _schedule_task(
+        pool,
+        _context(),
+        ScheduleTaskArgs(prompt="prompt", cron="not cron", title="title"),
+    )
+    too_frequent = await _schedule_task(
+        pool,
+        _context(),
+        ScheduleTaskArgs(prompt="prompt", cron="*/30 * * * *", title="title"),
+    )
+    created = await _schedule_task(
+        pool,
+        _context(),
+        ScheduleTaskArgs(prompt="prompt", cron="0 9 * * *", title="title"),
+    )
+
+    assert broken.status == too_frequent.status == "error"
+    assert broken.retryable is too_frequent.retryable is False
+    assert created.status == "ok"
+    assert pool.connection.tasks[0]["kind"] == "agent_task"
+    assert pool.connection.tasks[0]["next_run_at"].utcoffset() == timedelta(0)
+
+    pool.connection.tasks = [_task(index + 1, "agent_task", "0 9 * * *") for index in range(10)]
+    limited = await _schedule_task(
+        pool,
+        _context(),
+        ScheduleTaskArgs(prompt="prompt", cron="0 9 * * *", title="title"),
+    )
+    assert limited.status == "error"
+
+
+async def test_scheduled_task_list_and_cancel_mapping() -> None:
+    pool = FakePool()
+    future = datetime.now(UTC) + timedelta(days=1)
+    pool.connection.tasks = [
+        {
+            **_task(1, "agent_task", "0 9 * * *"),
+            "payload": "x" * 250,
+            "next_run_at": future,
+        }
+    ]
+
+    listed = await _list_scheduled_tasks(pool, _context())
+    cancelled = await _cancel_scheduled_task(pool, _context(), CancelScheduledTaskArgs(task_id=1))
+    missing = await _cancel_scheduled_task(pool, _context(), CancelScheduledTaskArgs(task_id=1))
+
+    assert listed.payload["tasks"] == [
+        {
+            "id": 1,
+            "title": "task 1",
+            "prompt": "x" * 200,
+            "cron": "0 9 * * *",
+            "next_run_at": future.astimezone(ZoneInfo("Europe/Moscow")).isoformat(),
+        }
+    ]
+    assert cancelled.status == "ok"
+    assert missing.status == "error"
+
+
+def test_agent_task_update_id_is_deterministic() -> None:
+    firing = datetime(2026, 7, 11, 9, tzinfo=UTC)
+    assert agent_task_update_id(7, firing) == agent_task_update_id(7, firing)
+    assert agent_task_update_id(7, firing) != agent_task_update_id(8, firing)

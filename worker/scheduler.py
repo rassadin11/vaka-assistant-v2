@@ -1,8 +1,9 @@
-"""Service-role poller that delivers due reminders."""
+"""Service-role poller for due reminders and recurring agent tasks."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -14,26 +15,30 @@ from asyncpg.pool import PoolConnectionProxy
 from croniter import croniter
 
 from core.db import service_transaction
+from core.envelope import UpdateEnvelope
 
 SendReply = Callable[[int, str], Awaitable[None]]
+EnqueueBackground = Callable[[UpdateEnvelope], Awaitable[object]]
 Clock = Callable[[], datetime]
 LOGGER = logging.getLogger(__name__)
 
 
 class SchedulerProcessor:
-    """Deliver due reminders inside one transaction per polling pass."""
+    """Deliver due reminders and enqueue due agent tasks in one transaction."""
 
     def __init__(
         self,
         service_pool: asyncpg.Pool,
         *,
         send_reply: SendReply,
+        enqueue_background: EnqueueBackground | None = None,
         poll_seconds: float = 60.0,
         clock: Clock | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._service_pool = service_pool
         self._send_reply = send_reply
+        self._enqueue_background = enqueue_background
         self._poll_seconds = poll_seconds
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
         self._logger = logger if logger is not None else LOGGER
@@ -58,15 +63,15 @@ class SchedulerProcessor:
                     await asyncio.wait_for(self._stop.wait(), timeout=self._poll_seconds)
 
     async def run_once(self) -> bool:
-        """Send and finalize at most twenty currently due reminder rows."""
+        """Process at most twenty currently due scheduled task rows."""
 
         async with service_transaction(self._service_pool) as connection:
             rows = await connection.fetch(
                 """
-                SELECT s.*, u.tg_chat_id, u.timezone
+                SELECT s.*, u.tg_user_id, u.tg_chat_id, u.timezone
                 FROM scheduled_tasks AS s
                 JOIN users AS u ON u.id = s.user_id
-                WHERE s.kind = 'reminder'
+                WHERE s.kind IN ('reminder', 'agent_task')
                   AND s.status = 'active'
                   AND s.next_run_at <= now()
                 ORDER BY s.next_run_at
@@ -75,9 +80,34 @@ class SchedulerProcessor:
                 """
             )
             for row in rows:
-                await self._send_reply(int(row["tg_chat_id"]), f"Напоминание: {row['payload']}")
+                if row["kind"] == "reminder":
+                    await self._send_reply(int(row["tg_chat_id"]), f"Напоминание: {row['payload']}")
+                elif row["kind"] == "agent_task":
+                    await self._enqueue_agent_task(row)
+                else:
+                    raise ValueError(f"unsupported scheduled task kind: {row['kind']}")
                 await self._finalize(connection, row)
         return bool(rows)
+
+    async def _enqueue_agent_task(self, row: asyncpg.Record) -> None:
+        if self._enqueue_background is None:
+            raise RuntimeError("scheduler agent-task enqueue callback is not configured")
+        next_run_at = row["next_run_at"]
+        if not isinstance(next_run_at, datetime):
+            raise TypeError("scheduled agent task next_run_at is not a datetime")
+        await self._enqueue_background(
+            UpdateEnvelope(
+                update_id=agent_task_update_id(int(row["id"]), next_run_at),
+                user_id=int(row["tg_user_id"]),
+                chat_id=int(row["tg_chat_id"]),
+                kind="agent_task",
+                payload={
+                    "text": str(row["payload"]),
+                    "scheduled_task_id": int(row["id"]),
+                    "title": str(row["title"]),
+                },
+            )
+        )
 
     async def _finalize(
         self,
@@ -109,3 +139,10 @@ class SchedulerProcessor:
             row["id"],
             next_run_at,
         )
+
+
+def agent_task_update_id(task_id: int, next_run_at: datetime) -> int:
+    """Derive a stable synthetic update id for one scheduled task firing."""
+
+    digest = hashlib.sha256(f"{task_id}:{int(next_run_at.timestamp())}".encode()).digest()
+    return 10**12 + int.from_bytes(digest[:8], "big") % 10**12

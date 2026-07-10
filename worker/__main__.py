@@ -33,7 +33,7 @@ from core.envelope import UpdateEnvelope
 from core.llm_openrouter import OpenRouterProvider, openrouter_settings_from_env
 from core.llm_resilient import ResilientLLMProvider
 from core.model_router import RouteRequest, StaticModelRouter
-from core.queue import redis_settings_from_env
+from core.queue import enqueue, redis_settings_from_env
 from core.registry_dispatcher import RegistryToolDispatcher
 from core.secrets import EnvSecretsProvider, SecretNotFoundError
 from core.telegram_sender import TelegramSender
@@ -160,7 +160,11 @@ async def _run() -> None:
             send_reply=send_reply,
         )
         outbox_processor = OutboxProcessor(service_pool, registry, send_reply=send_reply)
-        scheduler_processor = SchedulerProcessor(service_pool, send_reply=send_reply)
+        scheduler_processor = SchedulerProcessor(
+            service_pool,
+            send_reply=send_reply,
+            enqueue_background=lambda envelope: enqueue(queue_redis, "background", envelope),
+        )
         processor = OnboardingProcessor(
             service_pool=service_pool,
             cache_redis=cache_redis,

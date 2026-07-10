@@ -46,6 +46,19 @@ def _envelope(text: str = "new request") -> UpdateEnvelope:
     )
 
 
+def _agent_task_envelope(text: str = "scheduled request") -> UpdateEnvelope:
+    return UpdateEnvelope.model_validate(
+        {
+            "update_id": 1_000_000_000_001,
+            "user_id": 100,
+            "chat_id": 500,
+            "kind": "agent_task",
+            "payload": {"text": text, "scheduled_task_id": 1, "title": "Morning brief"},
+            "trace_id": str(_context().trace_id),
+        }
+    )
+
+
 async def _send(_chat_id: int, _text: str) -> None:
     return None
 
@@ -121,6 +134,34 @@ async def test_context_uses_loaded_summary_tail_and_trusted_dynamics(
     assert messages[1].content == "older tail"
     assert messages[-1] == LLMMessage(role="user", content="new request")
     assert captured[0][0].content == "new request"
+
+
+async def test_agent_task_uses_payload_text_background_usage_and_reply_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved_queues: list[str] = []
+
+    async def fake_load(*_args: object) -> DialogHistory:
+        return DialogHistory(summary=None, tail=[])
+
+    async def fake_save(*_args: object) -> list[UUID]:
+        return []
+
+    async def fake_save_usage(*args: object) -> None:
+        saved_queues.append(cast(str, args[3]))
+
+    monkeypatch.setattr("worker.agent_processor.load_dialog", fake_load)
+    monkeypatch.setattr("worker.agent_processor.save_messages", fake_save)
+    monkeypatch.setattr("worker.agent_processor.save_usage", fake_save_usage)
+    provider = MockLLMProvider.scripted([mock_text_response("scheduled answer")])
+    processor = _processor(provider)
+
+    assert (
+        await processor.process(_agent_task_envelope("prepare the report"), _context())
+        == "⏰ Morning brief:\nscheduled answer"
+    )
+    assert provider.calls[0].messages[-1] == LLMMessage(role="user", content="prepare the report")
+    assert saved_queues == ["background"]
 
 
 async def test_end_of_task_persists_user_tool_round_and_final_answer_once(

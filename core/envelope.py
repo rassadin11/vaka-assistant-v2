@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-EnvelopeKind = Literal["text", "voice", "document", "callback"]
+EnvelopeKind = Literal["text", "voice", "document", "callback", "agent_task"]
 RedisStreamEntry = dict[str | bytes, str | bytes]
 
 
