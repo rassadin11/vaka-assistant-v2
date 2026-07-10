@@ -1,0 +1,138 @@
+"""Pure, budgeted assembly of the LLM conversation context."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from core.llm import LLMMessage
+from core.prompt import STATIC_CORE
+from core.tokens import count_tokens, truncate_to_tokens
+
+BUDGETS: dict[str, int] = {"A": 1500, "C": 100, "D": 400, "E": 800, "F": 3000}
+
+_USER_DYNAMICS_HEADER = "=== USER CONTEXT ==="
+_FACTS_HEADER = "=== KNOWN FACTS ABOUT THE USER ==="
+_SUMMARY_HEADER = "=== SUMMARY OF OLDER HISTORY ==="
+
+
+@dataclass(frozen=True, slots=True)
+class UserDynamics:
+    """Trusted user-specific values included in dynamic block C."""
+
+    current_time: str
+    weekday: str
+    timezone: str
+    plan: str
+
+
+@dataclass(frozen=True, slots=True)
+class SummaryContext:
+    """The persisted older-dialogue summary and its recorded token count."""
+
+    text: str | None
+    token_count: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BuiltContext:
+    """The system message and bounded recent conversation passed to an LLM."""
+
+    system_message: LLMMessage
+    tail: list[LLMMessage]
+    needs_summarization: bool
+
+
+def build_context(
+    dynamics: UserDynamics,
+    *,
+    facts: Sequence[str] = (),
+    summary: SummaryContext | str | None = None,
+    tail: Sequence[LLMMessage] = (),
+) -> BuiltContext:
+    """Build blocks A--F while enforcing all configured token budgets."""
+
+    _require_within_budget("A", STATIC_CORE)
+    dynamics_block = _build_dynamics(dynamics)
+    _require_within_budget("C", dynamics_block)
+    facts_block = _fit_facts(facts)
+    summary_block = _fit_summary(summary)
+    bounded_tail, needs_summarization = _fit_tail(tail)
+
+    sections = [STATIC_CORE, _USER_DYNAMICS_HEADER, dynamics_block]
+    if facts_block:
+        sections.extend([_FACTS_HEADER, facts_block])
+    if summary_block:
+        sections.extend([_SUMMARY_HEADER, summary_block])
+    return BuiltContext(
+        system_message=LLMMessage(role="system", content="\n\n".join(sections)),
+        tail=bounded_tail,
+        needs_summarization=needs_summarization,
+    )
+
+
+def _build_dynamics(dynamics: UserDynamics) -> str:
+    return (
+        f"Current time: {dynamics.current_time} ({dynamics.weekday})\n"
+        f"Timezone: {dynamics.timezone}\nPlan: {dynamics.plan}"
+    )
+
+
+def _fit_facts(facts: Sequence[str]) -> str:
+    retained = list(facts)
+    while retained and count_tokens("\n".join(f"- {fact}" for fact in retained)) > BUDGETS["D"]:
+        retained.pop()
+    return "\n".join(f"- {fact}" for fact in retained)
+
+
+def _fit_summary(summary: SummaryContext | str | None) -> str:
+    text = summary.text if isinstance(summary, SummaryContext) else summary
+    if not text:
+        return ""
+    return truncate_to_tokens(text, BUDGETS["E"])
+
+
+def _fit_tail(tail: Sequence[LLMMessage]) -> tuple[list[LLMMessage], bool]:
+    groups = _turn_groups(tail)
+    total = sum(_message_tokens(message) for group in groups for message in group)
+    needs_summarization = total > BUDGETS["F"]
+    while groups and total > BUDGETS["F"]:
+        removed = groups.pop(0)
+        total -= sum(_message_tokens(message) for message in removed)
+    return [message for group in groups for message in group], needs_summarization
+
+
+def _turn_groups(messages: Sequence[LLMMessage]) -> list[list[LLMMessage]]:
+    groups: list[list[LLMMessage]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.role == "tool":
+            index += 1
+            continue
+        group = [message]
+        index += 1
+        if message.role == "assistant":
+            while index < len(messages) and messages[index].role == "tool":
+                group.append(messages[index])
+                index += 1
+        groups.append(group)
+    return groups
+
+
+def _message_tokens(message: LLMMessage) -> int:
+    serialized_calls = ""
+    if message.tool_calls:
+        serialized_calls = json.dumps(
+            [call.model_dump(mode="json") for call in message.tool_calls],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    return count_tokens("\n".join(part for part in (message.content, serialized_calls) if part))
+
+
+def _require_within_budget(block: str, text: str) -> None:
+    if count_tokens(text) > BUDGETS[block]:
+        raise ValueError(f"Block {block} exceeds its {BUDGETS[block]} token budget.")
