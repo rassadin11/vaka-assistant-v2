@@ -383,6 +383,7 @@ def _active_inner_processor(
         app_pool=app_pool,
         send=send_reply,
         embeddings=embeddings,
+        queue_redis=queue_redis,
     )
 
 

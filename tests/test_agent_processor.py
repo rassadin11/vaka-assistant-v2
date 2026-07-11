@@ -18,7 +18,7 @@ from core.envelope import UpdateEnvelope
 from core.llm import LLMMessage, LLMResponse, ToolDefinition
 from core.llm_mock import MockLLMProvider, mock_text_response, mock_tool_call_response
 from core.tools_dispatch import StaticToolDispatcher
-from worker.agent_processor import AgentProcessor
+from worker.agent_processor import SOFT_REFUSE_TEXT, AgentProcessor
 
 
 def _context() -> TaskContext:
@@ -86,6 +86,28 @@ def _processor(provider: MockLLMProvider, **kwargs: object) -> AgentProcessor:
 
 async def _save_usage(*_args: object) -> None:
     return None
+
+
+class _BudgetRedis:
+    def __init__(self, spent: str) -> None:
+        self.spent = spent
+        self.notice_claims = 0
+
+    async def get(self, _name: str) -> str:
+        return self.spent
+
+    async def incrbyfloat(self, _name: str, _amount: float | Decimal) -> Decimal:
+        return Decimal(0)
+
+    async def expire(self, _name: str, _seconds: int) -> bool:
+        return True
+
+    async def set(
+        self, _name: str, _value: str, *, ex: int | None = None, nx: bool = False
+    ) -> bool:
+        del ex, nx
+        self.notice_claims += 1
+        return self.notice_claims == 1
 
 
 async def test_context_uses_loaded_summary_tail_and_trusted_dynamics(
@@ -479,3 +501,40 @@ async def test_processor_saves_usage_when_agent_times_out(
 
     assert len(saved[0]) == 1
     assert saved_messages[0][-1].meta == {"prompt_version": "v1", "stop_reason": "timeout"}
+
+
+async def test_soft_refuse_does_not_call_the_llm() -> None:
+    provider = MockLLMProvider.scripted([mock_text_response("must not be used")])
+    processor = _processor(provider, queue_redis=_BudgetRedis("22.5"))
+
+    assert await processor.process(_envelope(), _context()) == SOFT_REFUSE_TEXT
+    assert provider.calls == []
+
+
+async def test_background_budget_skip_notifies_only_once_per_local_day() -> None:
+    provider = MockLLMProvider.scripted([mock_text_response("must not be used")])
+    sent: list[tuple[int, str]] = []
+
+    async def send(chat_id: int, text: str) -> None:
+        sent.append((chat_id, text))
+
+    processor = AgentProcessor(
+        provider,
+        StaticToolDispatcher([], {}),
+        AgentLoopConfig(),
+        app_pool=object(),  # type: ignore[arg-type]
+        send=send,
+        queue_redis=_BudgetRedis("15"),
+    )
+
+    assert await processor.process(_agent_task_envelope(), _context()) is None
+    assert await processor.process(_agent_task_envelope(), _context()) is None
+
+    assert provider.calls == []
+    assert sent == [
+        (
+            500,
+            "⏰ Morning brief: фоновая задача пропущена — дневной лимит исчерпан, "
+            "продолжится завтра",
+        )
+    ]

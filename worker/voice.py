@@ -13,6 +13,7 @@ import asyncpg
 
 from core.context import TaskContext
 from core.envelope import UpdateEnvelope
+from core.spend import BudgetState, add_spend, budget_state, daily_budget_rub, get_spent_rub
 from core.stt import STTProvider, STTUnavailableError
 from core.usage_store import save_stt_usage
 from worker.documents import MAX_DOCUMENT_BYTES, DownloadFile, QueueRedis
@@ -27,6 +28,10 @@ DAILY_LIMIT_TEXT = "Превышен дневной лимит голосовы�
 STT_UNAVAILABLE_TEXT = "Не получилось распознать голосовое, попробуйте позже или напишите текстом"
 EMPTY_TRANSCRIPT_TEXT = "Не удалось разобрать голосовое, попробуйте ещё раз или напишите текстом"
 VOICE_UNAVAILABLE_TEXT = "Голосовые сообщения временно недоступны, напишите текстом"
+SOFT_REFUSE_TEXT = (
+    "На сегодня дневной лимит ассистента исчерпан. Продолжим после полуночи — "
+    "или напишите /feedback, если лимит мешает"
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -55,6 +60,8 @@ class VoiceProcessor:
         """Apply limits, transcribe, and pass the rewritten text envelope to the agent."""
 
         try:
+            if await self._budget_state(context) is BudgetState.SOFT_REFUSE:
+                return SOFT_REFUSE_TEXT
             duration = _duration(envelope.payload.get("duration"))
             if duration is None:
                 return STT_UNAVAILABLE_TEXT
@@ -79,7 +86,13 @@ class VoiceProcessor:
                 return EMPTY_TRANSCRIPT_TEXT
 
             await self._increment_minutes(context, minutes)
-            await self._save_usage(context, result.cost_usd)
+            if await self._save_usage(context, result.cost_usd):
+                await add_spend(
+                    self._queue_redis,
+                    context.user_id,
+                    context.timezone,
+                    result.cost_usd,
+                )
             rewritten = envelope.model_copy(
                 update={
                     "kind": "text",
@@ -108,13 +121,21 @@ class VoiceProcessor:
         if value == minutes:
             await self._queue_redis.expire(_daily_minutes_key(context), VOICE_COUNTER_TTL_SECONDS)
 
-    async def _save_usage(self, context: TaskContext, cost_usd: Decimal) -> None:
+    async def _budget_state(self, context: TaskContext) -> BudgetState:
+        """Read the daily budget once before any voice download or STT work."""
+
+        spent = await get_spent_rub(self._queue_redis, context.user_id, context.timezone)
+        return budget_state(spent, daily_budget_rub(context.plan))
+
+    async def _save_usage(self, context: TaskContext, cost_usd: Decimal) -> bool:
         try:
             await save_stt_usage(self._app_pool, context.user_id, context.trace_id, cost_usd)
+            return True
         except Exception:
             self._logger.exception(
                 "failed to save STT usage", extra={"trace_id": str(context.trace_id)}
             )
+            return False
 
 
 def _daily_minutes_key(context: TaskContext) -> str:

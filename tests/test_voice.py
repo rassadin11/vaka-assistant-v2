@@ -10,6 +10,7 @@ import pytest
 
 from core.context import TaskContext
 from core.envelope import UpdateEnvelope
+from core.spend import spend_key
 from core.stt import MockSTTProvider, STTResult, STTUnavailableError
 from worker.voice import (
     DAILY_LIMIT_TEXT,
@@ -34,6 +35,11 @@ class FakeRedis:
 
     async def incrby(self, name: str, amount: int) -> int:
         result = int(self.values.get(name, "0")) + amount
+        self.values[name] = str(result)
+        return result
+
+    async def incrbyfloat(self, name: str, amount: float | Decimal) -> Decimal:
+        result = Decimal(self.values.get(name, "0")) + Decimal(str(amount))
         self.values[name] = str(result)
         return result
 
@@ -202,3 +208,37 @@ async def test_stt_failure_is_a_reply_not_a_processor_error() -> None:
     )  # type: ignore[arg-type]
 
     assert await processor.process(_envelope(), _context()) == STT_UNAVAILABLE_TEXT
+
+
+async def test_soft_refuse_happens_before_download_or_stt() -> None:
+    context = _context()
+    redis = FakeRedis({spend_key(context.user_id, context.timezone): "22.5"})
+    downloads = 0
+
+    async def download(_file_id: str, _maximum: int) -> bytes:
+        nonlocal downloads
+        downloads += 1
+        return b"voice"
+
+    class NeverSTT:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def transcribe(self, _audio: bytes, _filename: str) -> STTResult:
+            self.calls += 1
+            raise AssertionError("STT must not be called")
+
+    provider = NeverSTT()
+    processor = VoiceProcessor(
+        object(),
+        redis,
+        download,
+        provider,
+        RecordingInner(),  # type: ignore[arg-type]
+    )
+
+    assert "дневной лимит ассистента исчерпан" in (
+        await processor.process(_envelope(), context) or ""
+    )
+    assert downloads == 0
+    assert provider.calls == 0

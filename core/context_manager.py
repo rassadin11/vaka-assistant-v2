@@ -50,15 +50,17 @@ def build_context(
     facts: Sequence[str] = (),
     summary: SummaryContext | str | None = None,
     tail: Sequence[LLMMessage] = (),
+    lean: bool = False,
 ) -> BuiltContext:
     """Build blocks A--F while enforcing all configured token budgets."""
 
     _require_within_budget("A", STATIC_CORE)
     dynamics_block = _build_dynamics(dynamics)
     _require_within_budget("C", dynamics_block)
-    facts_block = _fit_facts(facts)
+    facts_block = "" if lean else _fit_facts(facts)
     summary_block = _fit_summary(summary)
-    bounded_tail, trimmed, needs_summarization = _fit_tail(tail)
+    tail_budget = BUDGETS["F"] // 2 if lean else BUDGETS["F"]
+    bounded_tail, trimmed, needs_summarization = _fit_tail(tail, tail_budget)
 
     sections = [STATIC_CORE, _USER_DYNAMICS_HEADER, dynamics_block]
     if facts_block:
@@ -94,12 +96,14 @@ def _fit_summary(summary: SummaryContext | str | None) -> str:
     return truncate_to_tokens(text, BUDGETS["E"])
 
 
-def _fit_tail(tail: Sequence[LLMMessage]) -> tuple[list[LLMMessage], list[LLMMessage], bool]:
+def _fit_tail(
+    tail: Sequence[LLMMessage], budget: int
+) -> tuple[list[LLMMessage], list[LLMMessage], bool]:
     groups = _turn_groups(tail)
     total = sum(_message_tokens(message) for group in groups for message in group)
-    needs_summarization = total > BUDGETS["F"]
+    needs_summarization = total > budget
     trimmed: list[LLMMessage] = []
-    while groups and total > BUDGETS["F"]:
+    while groups and total > budget:
         removed = groups.pop(0)
         trimmed.extend(removed)
         total -= sum(_message_tokens(message) for message in removed)

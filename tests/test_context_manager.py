@@ -75,3 +75,15 @@ def test_dynamics_include_iso_time_and_timezone() -> None:
 
     assert "2026-07-10T12:30:00+05:00" in content
     assert "Asia/Yekaterinburg" in content
+
+
+def test_lean_context_omits_facts_and_halves_the_tail_budget() -> None:
+    old = LLMMessage(role="user", content="old " * 1_000)
+    recent = LLMMessage(role="user", content="recent " * 1_000)
+
+    standard = build_context(_dynamics(), facts=["Prefers tea"], tail=[old, recent])
+    lean = build_context(_dynamics(), facts=["Prefers tea"], tail=[old, recent], lean=True)
+
+    assert "=== KNOWN FACTS ABOUT THE USER ===" not in (lean.system_message.content or "")
+    assert len(lean.tail) < len(standard.tail)
+    assert lean.trimmed
