@@ -13,6 +13,7 @@ import asyncpg
 
 from core.context import TaskContext
 from core.envelope import UpdateEnvelope
+from core.limits import message_limit_reached
 from core.spend import BudgetState, add_spend, budget_state, daily_budget_rub, get_spent_rub
 from core.stt import STTProvider, STTUnavailableError
 from core.usage_store import save_stt_usage
@@ -31,6 +32,10 @@ VOICE_UNAVAILABLE_TEXT = "Голосовые сообщения временно
 SOFT_REFUSE_TEXT = (
     "На сегодня дневной лимит ассистента исчерпан. Продолжим после полуночи — "
     "или напишите /feedback, если лимит мешает"
+)
+MESSAGE_LIMIT_TEXT = (
+    "На сегодня лимит сообщений исчерпан. Продолжим после полуночи — "
+    "или напишите /feedback, если лимита не хватает"
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -60,6 +65,10 @@ class VoiceProcessor:
         """Apply limits, transcribe, and pass the rewritten text envelope to the agent."""
 
         try:
+            if await message_limit_reached(
+                self._queue_redis, context.user_id, context.plan, context.timezone
+            ):
+                return MESSAGE_LIMIT_TEXT
             if await self._budget_state(context) is BudgetState.SOFT_REFUSE:
                 return SOFT_REFUSE_TEXT
             duration = _duration(envelope.payload.get("duration"))

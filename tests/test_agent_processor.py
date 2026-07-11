@@ -15,10 +15,11 @@ from core.context import TaskContext
 from core.context_manager import SummaryContext
 from core.dialog_store import DialogHistory, MessageDraft, StoredMessage
 from core.envelope import UpdateEnvelope
+from core.limits import message_key
 from core.llm import LLMMessage, LLMResponse, ToolDefinition
 from core.llm_mock import MockLLMProvider, mock_text_response, mock_tool_call_response
 from core.tools_dispatch import StaticToolDispatcher
-from worker.agent_processor import SOFT_REFUSE_TEXT, AgentProcessor
+from worker.agent_processor import MESSAGE_LIMIT_TEXT, SOFT_REFUSE_TEXT, AgentProcessor
 
 
 def _context() -> TaskContext:
@@ -92,6 +93,7 @@ class _BudgetRedis:
     def __init__(self, spent: str) -> None:
         self.spent = spent
         self.notice_claims = 0
+        self.message_increments = 0
 
     async def get(self, _name: str) -> str:
         return self.spent
@@ -101,6 +103,10 @@ class _BudgetRedis:
 
     async def expire(self, _name: str, _seconds: int) -> bool:
         return True
+
+    async def incr(self, _name: str) -> int:
+        self.message_increments += 1
+        return self.message_increments
 
     async def set(
         self, _name: str, _value: str, *, ex: int | None = None, nx: bool = False
@@ -505,10 +511,110 @@ async def test_processor_saves_usage_when_agent_times_out(
 
 async def test_soft_refuse_does_not_call_the_llm() -> None:
     provider = MockLLMProvider.scripted([mock_text_response("must not be used")])
-    processor = _processor(provider, queue_redis=_BudgetRedis("22.5"))
+    redis = _BudgetRedis("22.5")
+    processor = _processor(provider, queue_redis=redis)
 
     assert await processor.process(_envelope(), _context()) == SOFT_REFUSE_TEXT
     assert provider.calls == []
+    assert redis.message_increments == 0
+
+
+async def test_message_limit_boundary_refuses_without_incrementing() -> None:
+    context = _context()
+    key = message_key(context.user_id, context.timezone)
+
+    class MessageRedis(_BudgetRedis):
+        def __init__(self) -> None:
+            super().__init__("0")
+            self.values = {key: "100"}
+            self.increments = 0
+
+        async def get(self, name: str) -> str:
+            return self.values.get(name, "0")
+
+        async def incr(self, name: str) -> int:
+            self.increments += 1
+            self.values[name] = str(int(self.values.get(name, "0")) + 1)
+            return int(self.values[name])
+
+    redis = MessageRedis()
+    provider = MockLLMProvider.scripted([mock_text_response("must not be used")])
+    processor = _processor(provider, queue_redis=redis)
+
+    assert await processor.process(_envelope(), context) == MESSAGE_LIMIT_TEXT
+    assert provider.calls == []
+    assert redis.values[key] == "100"
+    assert redis.increments == 0
+
+
+async def test_agent_task_is_not_subject_to_or_counted_by_message_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _context()
+    key = message_key(context.user_id, context.timezone)
+
+    class MessageRedis(_BudgetRedis):
+        def __init__(self) -> None:
+            super().__init__("0")
+            self.values = {key: "100"}
+            self.increments = 0
+
+        async def get(self, name: str) -> str:
+            return self.values.get(name, "0")
+
+        async def incr(self, _name: str) -> int:
+            self.increments += 1
+            return self.increments
+
+    async def fake_load(*_args: object) -> DialogHistory:
+        return DialogHistory(summary=None, tail=[])
+
+    async def fake_save(*_args: object) -> list[UUID]:
+        return []
+
+    monkeypatch.setattr("worker.agent_processor.load_dialog", fake_load)
+    monkeypatch.setattr("worker.agent_processor.save_messages", fake_save)
+    monkeypatch.setattr("worker.agent_processor.save_usage", _save_usage)
+    redis = MessageRedis()
+    processor = _processor(
+        MockLLMProvider.scripted([mock_text_response("scheduled answer")]), queue_redis=redis
+    )
+
+    assert (
+        await processor.process(_agent_task_envelope(), context)
+        == "⏰ Morning brief:\nscheduled answer"
+    )
+    assert redis.values[key] == "100"
+    assert redis.increments == 0
+
+
+async def test_message_counter_failure_does_not_block_agent_processing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingRedis(_BudgetRedis):
+        async def get(self, name: str) -> str:
+            raise ConnectionError(name)
+
+        async def incr(self, name: str) -> int:
+            raise ConnectionError(name)
+
+        async def incrbyfloat(self, name: str, amount: float | Decimal) -> Decimal:
+            raise ConnectionError(f"{name}:{amount}")
+
+    async def fake_load(*_args: object) -> DialogHistory:
+        return DialogHistory(summary=None, tail=[])
+
+    async def fake_save(*_args: object) -> list[UUID]:
+        return []
+
+    monkeypatch.setattr("worker.agent_processor.load_dialog", fake_load)
+    monkeypatch.setattr("worker.agent_processor.save_messages", fake_save)
+    monkeypatch.setattr("worker.agent_processor.save_usage", _save_usage)
+    provider = MockLLMProvider.scripted([mock_text_response("answer")])
+    processor = _processor(provider, queue_redis=FailingRedis("0"))
+
+    assert await processor.process(_envelope(), _context()) == "answer"
+    assert len(provider.calls) == 1
 
 
 async def test_background_budget_skip_notifies_only_once_per_local_day() -> None:

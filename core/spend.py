@@ -12,6 +12,8 @@ from typing import Protocol
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+from core.time_keys import local_date_key
+
 SPEND_TTL_SECONDS = 3 * 86_400
 DEFAULT_USD_RUB_RATE = Decimal("90")
 DEFAULT_DAILY_BUDGET_RUB = Decimal("15")
@@ -89,10 +91,11 @@ def budget_state(spent: Decimal, budget: Decimal) -> BudgetState:
     return BudgetState.OK
 
 
-def spend_key(user_id: UUID, timezone: str) -> str:
+def spend_key(user_id: UUID, timezone: str, current: datetime | None = None) -> str:
     """Build today's spend key using the user's local calendar date."""
 
-    return f"spend_rub:{user_id}:{datetime.now(ZoneInfo(timezone)):%Y%m%d}"
+    local_current = current or datetime.now(ZoneInfo(timezone))
+    return f"spend_rub:{user_id}:{local_date_key(timezone, local_current)}"
 
 
 def _usd_rub_rate() -> Decimal:

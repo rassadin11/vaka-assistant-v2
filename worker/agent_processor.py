@@ -29,6 +29,7 @@ from core.dialog_store import (
 )
 from core.embeddings import EmbeddingsProvider, EmbeddingsUnavailableError
 from core.envelope import UpdateEnvelope
+from core.limits import LimitsRedis, add_message, message_limit_reached
 from core.llm import LLMMessage, LLMProvider
 from core.prompt import PROMPT_VERSION
 from core.queue import QueueName
@@ -55,9 +56,13 @@ SOFT_REFUSE_TEXT = (
     "На сегодня дневной лимит ассистента исчерпан. Продолжим после полуночи — "
     "или напишите /feedback, если лимит мешает"
 )
+MESSAGE_LIMIT_TEXT = (
+    "На сегодня лимит сообщений исчерпан. Продолжим после полуночи — "
+    "или напишите /feedback, если лимита не хватает"
+)
 
 
-class AgentRedis(SpendRedis, Protocol):
+class AgentRedis(SpendRedis, LimitsRedis, Protocol):
     """Redis commands used by the agent budget guard."""
 
     def set(
@@ -98,6 +103,8 @@ class AgentProcessor:
         text = envelope.payload.get("text")
         if not isinstance(text, str):
             return UNSUPPORTED_CONTENT_TEXT
+        if envelope.kind == "text" and await self._message_limit_reached(context):
+            return MESSAGE_LIMIT_TEXT
         state = await self._budget_state(context)
         if state is not BudgetState.OK:
             self._logger.info(
@@ -146,6 +153,8 @@ class AgentProcessor:
         async def notify_progress(progress_text: str) -> None:
             await self._send(context.chat_id, progress_text)
 
+        if envelope.kind == "text":
+            await self._add_message(context)
         result = await loop.run(messages, context, notify_progress=notify_progress)
         reply_text = result.text
         if envelope.kind == "agent_task":
@@ -232,6 +241,21 @@ class AgentProcessor:
             return BudgetState.OK
         spent = await get_spent_rub(self._queue_redis, context.user_id, context.timezone)
         return budget_state(spent, daily_budget_rub(context.plan))
+
+    async def _message_limit_reached(self, context: TaskContext) -> bool:
+        """Read the message counter once before budget degradation is evaluated."""
+
+        if self._queue_redis is None:
+            return False
+        return await message_limit_reached(
+            self._queue_redis, context.user_id, context.plan, context.timezone
+        )
+
+    async def _add_message(self, context: TaskContext) -> None:
+        """Record an interactive message immediately before it enters the agent loop."""
+
+        if self._queue_redis is not None:
+            await add_message(self._queue_redis, context.user_id, context.timezone)
 
     async def _claim_background_notice(self, context: TaskContext) -> bool:
         """Claim the local-day notification slot for a skipped background task."""
