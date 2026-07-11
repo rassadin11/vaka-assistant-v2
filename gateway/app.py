@@ -11,10 +11,11 @@ from typing import Any, Protocol, cast
 
 from aiogram import Bot
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
-from fastapi.responses import PlainTextResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 
 from core.envelope import UpdateEnvelope
+from core.metrics import active_metrics
 from core.queue import QueueName, enqueue
 from core.rate_limit import (
     DEFAULT_RATE_LIMIT_BURST,
@@ -104,6 +105,7 @@ async def handle_update(
     envelope = _envelope_from_update(update_dict)
     if envelope is None:
         return
+    active_metrics().updates_received.labels(kind=envelope.kind).inc()
 
     token = set_trace_id(str(envelope.trace_id))
     try:
@@ -134,6 +136,7 @@ async def _handle_envelope(
 
     dedup_key = f"dedup:{envelope.update_id}"
     if await cache_redis.exists(dedup_key):
+        active_metrics().updates_dedup_skipped.inc()
         logger.debug("duplicate update ignored", extra={"update_id": envelope.update_id})
         return
 
@@ -144,6 +147,7 @@ async def _handle_envelope(
         burst=rate_limit_burst,
     )
     if not allowed:
+        active_metrics().updates_rate_limited.inc()
         await _handle_rate_limited_update(
             cache_redis,
             envelope,
@@ -154,6 +158,7 @@ async def _handle_envelope(
 
     queue: QueueName = "background" if envelope.kind == "document" else "interactive"
     await enqueue_func(queue_redis, queue, envelope)
+    active_metrics().updates_enqueued.labels(queue=queue).inc()
     await cache_redis.set(dedup_key, "1", nx=True, ex=DEDUP_TTL_SECONDS)
 
 
@@ -213,8 +218,8 @@ def create_app(
         return Response(status_code=status.HTTP_200_OK)
 
     @app.get("/metrics")
-    async def metrics() -> PlainTextResponse:
-        return PlainTextResponse("# metrics placeholder for stage 6\n")
+    async def metrics() -> Response:
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     @app.post("/webhook/{secret_path}")
     async def webhook(

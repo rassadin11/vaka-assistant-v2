@@ -21,6 +21,7 @@ from core.locks import (
     extend_user_lock,
     release_user_lock,
 )
+from core.metrics import active_metrics
 from core.queue import (
     DEFAULT_MAX_DELIVERIES,
     DEFAULT_RECLAIM_MIN_IDLE_MS,
@@ -239,6 +240,7 @@ class Worker:
         else:
             return
 
+        started_at: float | None = None
         try:
             current_delivery_count = await self._message_delivery_count(message)
             envelope = envelope.model_copy(update={"attempt": current_delivery_count})
@@ -274,25 +276,31 @@ class Worker:
                     notify_admin=self._notify_admin,
                     send_reply=self._send_reply,
                 )
+                active_metrics().tasks_processed.labels(queue=message.queue, outcome="dlq").inc()
                 self._logger.warning("message moved to dlq", extra=log_extra)
                 return
 
+            started_at = time.monotonic()
             reply_text = await self._process_with_typing(envelope)
             if reply_text is not None:
                 await self._send_reply(envelope.chat_id, reply_text)
             await self._cache_redis.set(dedup_key, "1", ex=WORKER_DEDUP_TTL_SECONDS, nx=True)
             await ack(self._queue_redis, message.queue, message.stream, message.entry_id)
             await self._cache_redis.delete(attempt_key)
+            _record_task_result(message.queue, "ok", time.monotonic() - started_at)
             self._logger.info("message acknowledged", extra=log_extra)
         except TimeoutError:
+            _record_task_result(message.queue, "error", _task_elapsed(started_at))
             self._logger.exception("message processing timed out", extra=log_extra)
         except RedisConnectionError:
+            _record_task_result(message.queue, "error", _task_elapsed(started_at))
             self._logger.exception(
                 "redis connection failed while handling message",
                 extra=log_extra,
             )
             raise
         except Exception:
+            _record_task_result(message.queue, "error", _task_elapsed(started_at))
             self._logger.exception("message processing failed", extra=log_extra)
         finally:
             await release_user_lock(
@@ -364,3 +372,21 @@ class Worker:
 
 def _attempt_key(update_id: int) -> str:
     return f"attempts:{update_id}"
+
+
+def _task_elapsed(started_at: float | None) -> float | None:
+    """Return elapsed task processing time when processing actually began."""
+
+    if started_at is None:
+        return None
+    return time.monotonic() - started_at
+
+
+def _record_task_result(queue: QueueName, outcome: str, duration: float | None) -> None:
+    """Publish a completed worker result without timing pre-processing bookkeeping."""
+
+    if duration is None:
+        return
+    metrics = active_metrics()
+    metrics.task_duration.labels(queue=queue).observe(duration)
+    metrics.tasks_processed.labels(queue=queue, outcome=outcome).inc()

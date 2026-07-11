@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from core.context import TaskContext
 from core.db import user_transaction
 from core.llm import ToolDefinition
+from core.metrics import active_metrics
 
 LOGGER = logging.getLogger(__name__)
 ToolStatus = Literal["ok", "error", "pending_confirmation"]
@@ -354,6 +355,7 @@ class ToolRegistry:
                     result.error,
                     int((monotonic() - started) * 1000),
                 )
+            active_metrics().tool_calls.labels(tool=name, status=result.status).inc()
         except Exception:
             self._logger.warning("tool call audit logging failed", exc_info=True)
 

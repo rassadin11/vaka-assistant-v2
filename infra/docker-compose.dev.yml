@@ -74,6 +74,29 @@ services:
       retries: 20
       start_period: 5s
 
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+
+  grafana:
+    image: grafana/grafana:latest
+    depends_on:
+      - prometheus
+      - pgbouncer
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+
   redis-queue:
     image: redis:7.4.5-alpine
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
@@ -203,6 +226,8 @@ volumes:
   pgbackrest_spool:
   pgbackrest_spool_restore:
   redis_queue_data:
+  prometheus_data:
+  grafana_data:
   infisical_postgres_data:
   infisical_backups:
   infisical_redis_data:

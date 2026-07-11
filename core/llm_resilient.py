@@ -18,6 +18,7 @@ from core.llm import (
     LLMServerError,
     ToolDefinition,
 )
+from core.metrics import active_metrics
 
 Clock = Callable[[], float]
 Sleep = Callable[[float], Awaitable[None]]
@@ -119,6 +120,7 @@ class ResilientLLMProvider:
         primary_model: str,
         *,
         fallback_provider: LLMProvider | None = None,
+        fallback_model: str | None = None,
         config: ResilientLLMConfig | None = None,
         notify_admin: NotifyAdmin | None = None,
         clock: Clock | None = None,
@@ -127,6 +129,7 @@ class ResilientLLMProvider:
     ) -> None:
         self._primary_provider = primary_provider
         self._fallback_provider = fallback_provider
+        self._fallback_model = fallback_model or "fallback"
         self._redis = redis
         self._primary_model = primary_model
         self._config = config if config is not None else ResilientLLMConfig.from_env()
@@ -146,8 +149,10 @@ class ResilientLLMProvider:
         """Generate a response using the primary provider or an open fallback."""
 
         if self._fallback_provider is not None and await self._circuit_is_open():
+            active_metrics().llm_fallback.labels(self._primary_model, self._fallback_model).inc()
             return await self._generate_with_retries(
                 self._fallback_provider,
+                self._fallback_model,
                 messages,
                 tools=tools,
                 temperature=temperature,
@@ -157,6 +162,7 @@ class ResilientLLMProvider:
         try:
             response = await self._generate_with_retries(
                 self._primary_provider,
+                self._primary_model,
                 messages,
                 tools=tools,
                 temperature=temperature,
@@ -203,6 +209,7 @@ class ResilientLLMProvider:
     async def _generate_with_retries(
         self,
         provider: LLMProvider,
+        model: str,
         messages: Sequence[LLMMessage],
         *,
         tools: Sequence[ToolDefinition] | None,
@@ -213,6 +220,7 @@ class ResilientLLMProvider:
             try:
                 return await self._generate_once(
                     provider,
+                    model,
                     messages,
                     tools=tools,
                     temperature=temperature,
@@ -228,6 +236,7 @@ class ResilientLLMProvider:
     async def _generate_once(
         self,
         provider: LLMProvider,
+        model: str,
         messages: Sequence[LLMMessage],
         *,
         tools: Sequence[ToolDefinition] | None,
@@ -236,12 +245,18 @@ class ResilientLLMProvider:
     ) -> LLMResponse:
         await self._acquire_semaphore()
         try:
-            return await provider.generate(
+            response = await provider.generate(
                 messages,
                 tools=tools,
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
+        except Exception as exc:
+            active_metrics().llm_requests.labels(model=model, outcome=_llm_outcome(exc)).inc()
+            raise
+        else:
+            active_metrics().llm_requests.labels(model=response.model, outcome="ok").inc()
+            return response
         finally:
             await self._release_semaphore()
 
@@ -278,6 +293,18 @@ def _as_int(value: object | None) -> int:
         return int(cast("str | int | float", value))
     except (TypeError, ValueError):
         return 0
+
+
+def _llm_outcome(error: Exception) -> str:
+    """Map provider errors to the bounded Prometheus outcome label set."""
+
+    if isinstance(error, LLMRateLimitError):
+        return "429"
+    if isinstance(error, LLMServerError):
+        return "5xx"
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    return "other"
 
 
 def _monotonic() -> float:

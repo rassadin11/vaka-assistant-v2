@@ -1,0 +1,49 @@
+{
+  "uid": "assistant-product",
+  "title": "Продуктовый",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {"from": "now-30d", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "title": "DAU / WAU",
+      "type": "timeseries",
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "targets": [{"format": "time_series", "rawSql": "WITH days AS (SELECT generate_series(date_trunc('day', now()) - interval '29 days', date_trunc('day', now()), interval '1 day') AS day) SELECT day AS time, (SELECT COUNT(DISTINCT user_id) FROM messages WHERE role = 'user' AND created_at >= day AND created_at < day + interval '1 day') AS dau, (SELECT COUNT(DISTINCT user_id) FROM messages WHERE role = 'user' AND created_at >= day - interval '6 days' AND created_at < day + interval '1 day') AS wau FROM days ORDER BY time;", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "title": "Retention D7",
+      "type": "stat",
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "targets": [{"format": "table", "rawSql": "WITH cohort AS (SELECT user_id, MIN(created_at::date) AS first_day FROM messages WHERE role = 'user' GROUP BY user_id), eligible AS (SELECT user_id FROM cohort WHERE first_day = current_date - 7), retained AS (SELECT DISTINCT m.user_id FROM messages m JOIN cohort c ON c.user_id = m.user_id WHERE m.role = 'user' AND c.first_day = current_date - 7 AND m.created_at::date = c.first_day + 7) SELECT CASE WHEN (SELECT COUNT(*) FROM eligible) = 0 THEN 0 ELSE 100.0 * (SELECT COUNT(*) FROM retained) / (SELECT COUNT(*) FROM eligible) END AS retention_d7_percent;", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+    },
+    {
+      "id": 3,
+      "title": "Сообщений на пользователя в день",
+      "type": "timeseries",
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "targets": [{"format": "time_series", "rawSql": "WITH per_user_day AS (SELECT date_trunc('day', created_at) AS day, user_id, COUNT(*) AS messages FROM messages WHERE role = 'user' GROUP BY 1, 2) SELECT day AS time, AVG(messages) AS average, percentile_cont(0.5) WITHIN GROUP (ORDER BY messages) AS median FROM per_user_day GROUP BY day ORDER BY time;", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+    },
+    {
+      "id": 4,
+      "title": "Доля голосовых сообщений",
+      "type": "timeseries",
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "targets": [{"format": "time_series", "rawSql": "SELECT date_trunc('day', created_at) AS time, 100.0 * COUNT(*) FILTER (WHERE meta ->> 'modality' = 'voice') / NULLIF(COUNT(*), 0) AS voice_share_percent FROM messages WHERE role = 'user' GROUP BY 1 ORDER BY time;", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+    },
+    {
+      "id": 5,
+      "title": "Распределение tool-вызовов за 7 дней",
+      "type": "barchart",
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "targets": [{"format": "table", "rawSql": "SELECT tool_name, COUNT(*) AS calls FROM tool_calls_log WHERE created_at >= now() - interval '7 days' GROUP BY tool_name ORDER BY calls DESC;", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16}
+    }
+  ]
+}

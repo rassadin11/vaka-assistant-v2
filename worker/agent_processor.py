@@ -38,6 +38,7 @@ from core.limits import (
     message_limit_reached,
 )
 from core.llm import LLMMessage, LLMProvider
+from core.metrics import record_llm_cost
 from core.prompt import PROMPT_VERSION
 from core.queue import QueueName
 from core.spend import (
@@ -191,7 +192,7 @@ class AgentProcessor:
             _queue_for_envelope(envelope),
             recorder.records,
         )
-        await self._add_recorded_spend(context, recorder.records)
+        await self._add_recorded_spend(context, recorder.records, _queue_for_envelope(envelope))
         self._schedule_limit_approach_notifications(envelope, context)
 
         if built.needs_summarization and built.trimmed:
@@ -243,6 +244,9 @@ class AgentProcessor:
                     timezone,
                     sum((record.cost_usd for record in recorder.records), Decimal(0)),
                 )
+                record_llm_cost(
+                    sum((record.cost_usd for record in recorder.records), Decimal(0)), "background"
+                )
         except Exception:
             self._logger.exception("dialogue summarization failed")
 
@@ -287,7 +291,7 @@ class AgentProcessor:
             return False
 
     async def _add_recorded_spend(
-        self, context: TaskContext, records: Sequence[UsageRecord]
+        self, context: TaskContext, records: Sequence[UsageRecord], queue: QueueName
     ) -> None:
         """Account for successfully persisted LLM usage without touching the usage store."""
 
@@ -295,6 +299,7 @@ class AgentProcessor:
             return
         total = sum((record.cost_usd for record in records), Decimal(0))
         await add_spend(self._queue_redis, context.user_id, context.timezone, total)
+        record_llm_cost(total, queue)
 
     def _schedule_limit_approach_notifications(
         self, envelope: UpdateEnvelope, context: TaskContext

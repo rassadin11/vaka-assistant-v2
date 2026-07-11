@@ -15,6 +15,7 @@ import asyncpg
 from core.context import TaskContext
 from core.envelope import UpdateEnvelope
 from core.limits import LimitAxis, claim_limit_notice, message_limit_reached
+from core.metrics import active_metrics, record_llm_cost
 from core.spend import BudgetState, add_spend, budget_state, daily_budget_rub, get_spent_rub
 from core.stt import STTProvider, STTUnavailableError
 from core.usage_store import save_stt_usage
@@ -96,7 +97,12 @@ class VoiceProcessor:
             try:
                 result = await self._stt_provider.transcribe(audio, "voice.ogg")
             except STTUnavailableError:
+                active_metrics().stt_requests.labels(outcome="error").inc()
                 return STT_UNAVAILABLE_TEXT
+            except Exception:
+                active_metrics().stt_requests.labels(outcome="error").inc()
+                raise
+            active_metrics().stt_requests.labels(outcome="ok").inc()
             if not result.text.strip():
                 return EMPTY_TRANSCRIPT_TEXT
 
@@ -109,6 +115,7 @@ class VoiceProcessor:
                     context.timezone,
                     result.cost_usd,
                 )
+                record_llm_cost(result.cost_usd, "stt")
             rewritten = envelope.model_copy(
                 update={
                     "kind": "text",

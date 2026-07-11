@@ -16,12 +16,14 @@ import logging
 import os
 import signal
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import replace
 from typing import TYPE_CHECKING, NoReturn, cast
 
 import asyncpg
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from prometheus_client import start_http_server
 from redis.asyncio import Redis
 
 from core.agent import AgentLoopConfig
@@ -33,8 +35,9 @@ from core.envelope import UpdateEnvelope
 from core.llm_openrouter import OpenRouterProvider, openrouter_settings_from_env
 from core.llm_resilient import ResilientLLMProvider
 from core.logging_setup import setup_logging
+from core.metrics import active_metrics
 from core.model_router import RouteRequest, StaticModelRouter
-from core.queue import enqueue, redis_settings_from_env
+from core.queue import enqueue, redis_settings_from_env, stream_keys
 from core.registry_dispatcher import RegistryToolDispatcher
 from core.secrets import EnvSecretsProvider, SecretNotFoundError
 from core.stt import GroqSTTProvider, STTProvider
@@ -188,6 +191,8 @@ async def _run() -> None:
         config=config,
     )
     _install_signal_handlers(worker)
+    start_worker_metrics_server()
+    queue_depth_task = asyncio.create_task(_queue_depth_collector(queue_redis))
     outbox_task = (
         asyncio.create_task(outbox_processor.run()) if outbox_processor is not None else None
     )
@@ -199,6 +204,9 @@ async def _run() -> None:
     except KeyboardInterrupt:
         worker.request_stop()
     finally:
+        queue_depth_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await queue_depth_task
         if outbox_processor is not None:
             outbox_processor.request_stop()
         if scheduler_processor is not None:
@@ -215,6 +223,51 @@ async def _run() -> None:
             await app_pool.close()
         if bot is not None:
             await bot.session.close()
+
+
+def start_worker_metrics_server() -> None:
+    """Start the worker Prometheus endpoint unless metrics are disabled or tests run."""
+
+    port = _worker_metrics_port()
+    if port == 0 or "PYTEST_CURRENT_TEST" in os.environ:
+        return
+    start_http_server(port)
+
+
+async def collect_queue_depths(queue_redis: Redis) -> None:
+    """Sum Redis Stream lengths for every partition of each worker queue."""
+
+    metrics = active_metrics()
+    for queue in ("interactive", "background"):
+        lengths = await asyncio.gather(*(queue_redis.xlen(key) for key in stream_keys(queue)))
+        metrics.queue_depth.labels(queue=queue).set(sum(int(length) for length in lengths))
+
+
+async def _queue_depth_collector(queue_redis: Redis) -> None:
+    """Refresh queue-depth gauges every 15 seconds without stopping the worker on Redis errors."""
+
+    logger = logging.getLogger(__name__)
+    while True:
+        try:
+            await collect_queue_depths(queue_redis)
+        except Exception:
+            logger.warning("queue depth collection failed", exc_info=True)
+        await asyncio.sleep(15)
+
+
+def _worker_metrics_port() -> int:
+    """Read the optional worker metrics listener port from the environment."""
+
+    raw = os.getenv("WORKER_METRICS_PORT", "9100")
+    try:
+        port = int(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning("invalid WORKER_METRICS_PORT=%r; metrics disabled", raw)
+        return 0
+    if port < 0 or port > 65_535:
+        logging.getLogger(__name__).warning("invalid WORKER_METRICS_PORT=%r; metrics disabled", raw)
+        return 0
+    return port
 
 
 async def _create_service_pool_or_fail() -> asyncpg.Pool:
@@ -367,6 +420,7 @@ def _active_inner_processor(
         queue_redis,
         settings.model,
         fallback_provider=fallback_provider,
+        fallback_model=fallback_model or None,
         notify_admin=notify_admin,
     )
     return AgentProcessor(

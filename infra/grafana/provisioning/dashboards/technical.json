@@ -1,0 +1,71 @@
+{
+  "uid": "assistant-technical",
+  "title": "Технический",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "title": "Глубина очередей",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "queue_depth", "legendFormat": "{{queue}}", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "title": "Латентность задач p50 / p95",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le, queue) (rate(task_duration_seconds_bucket[$__rate_interval])))", "legendFormat": "p50 {{queue}}", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (le, queue) (rate(task_duration_seconds_bucket[$__rate_interval])))", "legendFormat": "p95 {{queue}}", "refId": "B"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+    },
+    {
+      "id": 3,
+      "title": "Ошибки LLM и fallback",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum by (outcome) (rate(llm_requests_total{outcome!=\"ok\"}[$__rate_interval]))", "legendFormat": "LLM {{outcome}}", "refId": "A"},
+        {"expr": "sum by (from, to) (rate(llm_fallback_total[$__rate_interval]))", "legendFormat": "fallback {{from}} → {{to}}", "refId": "B"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+    },
+    {
+      "id": 4,
+      "title": "Стоимость ₽/день (Prometheus)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum by (queue) (increase(llm_cost_rub_total[1d]))", "legendFormat": "{{queue}}", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+    },
+    {
+      "id": 5,
+      "title": "Стоимость за сегодня (PostgreSQL)",
+      "type": "stat",
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "targets": [{"format": "table", "rawSql": "SELECT COALESCE(SUM(cost_usd) * 90, 0) AS rub_today FROM usage WHERE created_at >= date_trunc('day', now());", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 16}
+    },
+    {
+      "id": 6,
+      "title": "Топ-10 пользователей по стоимости за день",
+      "type": "table",
+      "datasource": {"type": "postgres", "uid": "postgres"},
+      "targets": [{"format": "table", "rawSql": "SELECT u.tg_user_id, SUM(usage.cost_usd) * 90 AS rub_today FROM usage JOIN users u ON u.id = usage.user_id WHERE usage.created_at >= date_trunc('day', now()) GROUP BY u.tg_user_id ORDER BY rub_today DESC LIMIT 10;", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 16, "x": 8, "y": 16}
+    },
+    {
+      "id": 7,
+      "title": "DLQ",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum by (queue) (increase(tasks_processed_total{outcome=\"dlq\"}[$__rate_interval]))", "legendFormat": "{{queue}}", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 24}
+    }
+  ]
+}
