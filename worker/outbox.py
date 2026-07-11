@@ -16,6 +16,7 @@ import asyncpg
 from core.context import TaskContext
 from core.db import service_transaction
 from core.tools import ToolRegistry
+from core.tracing import reset_trace_id, set_trace_id
 
 SendReply = Callable[[int, str], Awaitable[None]]
 LOGGER = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ class OutboxProcessor:
             return False
         action_id = row["id"]
         action = _object(row["action"])
+        token = set_trace_id(_string(action, "trace_id"))
         try:
             context = await self._context_for(row["user_id"], action)
             result = await self._registry.execute_outbox(
@@ -86,6 +88,8 @@ class OutboxProcessor:
         except Exception as exc:
             self._logger.exception("outbox action failed", extra={"action_id": str(action_id)})
             await self._retry_or_fail(action_id, str(exc))
+        finally:
+            reset_trace_id(token)
         return True
 
     async def _claim(self) -> asyncpg.Record | None:

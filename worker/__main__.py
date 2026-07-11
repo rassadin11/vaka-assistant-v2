@@ -32,6 +32,7 @@ from core.embeddings import EmbeddingsProvider, HttpEmbeddingsProvider
 from core.envelope import UpdateEnvelope
 from core.llm_openrouter import OpenRouterProvider, openrouter_settings_from_env
 from core.llm_resilient import ResilientLLMProvider
+from core.logging_setup import setup_logging
 from core.model_router import RouteRequest, StaticModelRouter
 from core.queue import enqueue, redis_settings_from_env
 from core.registry_dispatcher import RegistryToolDispatcher
@@ -69,16 +70,7 @@ type DownloadFileCallback = Callable[[str, int], Awaitable[bytes]]
 def main() -> NoReturn:
     """Run the worker process."""
 
-    handler = logging.StreamHandler()
-    handler.addFilter(_TraceIdFilter())
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s trace_id=%(trace_id)s %(name)s: %(message)s")
-    )
-    logging.basicConfig(
-        level=logging.INFO,
-        handlers=[handler],
-        force=True,
-    )
+    setup_logging("worker")
     asyncio.run(_run())
     raise SystemExit(0)
 
@@ -445,13 +437,6 @@ class KindRouter:
         if envelope.kind == "voice":
             return await self._voice.process(envelope, context)
         return await self._inner.process(envelope, context)
-
-
-class _TraceIdFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        if not hasattr(record, "trace_id"):
-            record.trace_id = "-"
-        return True
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ from core.rate_limit import (
     allow_user_update,
 )
 from core.telegram_sender import TelegramSender
+from core.tracing import reset_trace_id, set_trace_id
 from gateway.config import GatewayConfig, config_from_env, optional_telegram_bot_token
 
 ALLOWED_UPDATES = ["message", "callback_query"]
@@ -103,6 +104,33 @@ async def handle_update(
     envelope = _envelope_from_update(update_dict)
     if envelope is None:
         return
+
+    token = set_trace_id(str(envelope.trace_id))
+    try:
+        await _handle_envelope(
+            envelope,
+            queue_redis=queue_redis,
+            cache_redis=cache_redis,
+            enqueue_func=enqueue_func,
+            send_user_message=send_user_message,
+            rate_limit_per_minute=rate_limit_per_minute,
+            rate_limit_burst=rate_limit_burst,
+        )
+    finally:
+        reset_trace_id(token)
+
+
+async def _handle_envelope(
+    envelope: UpdateEnvelope,
+    *,
+    queue_redis: QueueRedis,
+    cache_redis: CacheRedis,
+    enqueue_func: EnqueueFunc,
+    send_user_message: SendUserMessage | None,
+    rate_limit_per_minute: int,
+    rate_limit_burst: int,
+) -> None:
+    """Deduplicate, rate limit, and enqueue one traced update envelope."""
 
     dedup_key = f"dedup:{envelope.update_id}"
     if await cache_redis.exists(dedup_key):

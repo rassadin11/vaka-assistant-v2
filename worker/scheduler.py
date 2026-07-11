@@ -8,6 +8,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import asyncpg
@@ -16,6 +17,7 @@ from croniter import croniter
 
 from core.db import service_transaction
 from core.envelope import UpdateEnvelope
+from core.tracing import reset_trace_id, set_trace_id
 
 SendReply = Callable[[int, str], Awaitable[None]]
 EnqueueBackground = Callable[[UpdateEnvelope], Awaitable[object]]
@@ -80,16 +82,23 @@ class SchedulerProcessor:
                 """
             )
             for row in rows:
-                if row["kind"] == "reminder":
-                    await self._send_reply(int(row["tg_chat_id"]), f"Напоминание: {row['payload']}")
-                elif row["kind"] == "agent_task":
-                    await self._enqueue_agent_task(row)
-                else:
-                    raise ValueError(f"unsupported scheduled task kind: {row['kind']}")
-                await self._finalize(connection, row)
+                trace_id = uuid4()
+                token = set_trace_id(str(trace_id))
+                try:
+                    if row["kind"] == "reminder":
+                        await self._send_reply(
+                            int(row["tg_chat_id"]), f"Напоминание: {row['payload']}"
+                        )
+                    elif row["kind"] == "agent_task":
+                        await self._enqueue_agent_task(row, trace_id=trace_id)
+                    else:
+                        raise ValueError(f"unsupported scheduled task kind: {row['kind']}")
+                    await self._finalize(connection, row)
+                finally:
+                    reset_trace_id(token)
         return bool(rows)
 
-    async def _enqueue_agent_task(self, row: asyncpg.Record) -> None:
+    async def _enqueue_agent_task(self, row: asyncpg.Record, *, trace_id: UUID) -> None:
         if self._enqueue_background is None:
             raise RuntimeError("scheduler agent-task enqueue callback is not configured")
         next_run_at = row["next_run_at"]
@@ -106,6 +115,7 @@ class SchedulerProcessor:
                     "scheduled_task_id": int(row["id"]),
                     "title": str(row["title"]),
                 },
+                trace_id=trace_id,
             )
         )
 

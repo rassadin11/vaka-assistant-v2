@@ -13,6 +13,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import Update
 from redis.asyncio import Redis
 
+from core.logging_setup import setup_logging
 from core.telegram_sender import TelegramSender
 from gateway.app import ALLOWED_UPDATES, handle_update
 from gateway.config import config_from_env, optional_telegram_bot_token, telegram_bot_token
@@ -21,6 +22,7 @@ from gateway.config import config_from_env, optional_telegram_bot_token, telegra
 def main() -> NoReturn:
     """Run the gateway app or a Telegram management command."""
 
+    setup_logging("gateway")
     command = sys.argv[1] if len(sys.argv) > 1 else "serve"
     if command == "serve":
         config = config_from_env()

@@ -36,6 +36,7 @@ from core.queue import (
     reclaim_stale_pending,
     send_dlq_notifications,
 )
+from core.tracing import reset_trace_id, set_trace_id
 from worker.processor import Processor
 
 SendReplyCallback = Callable[[int, str], Awaitable[None]]
@@ -201,6 +202,13 @@ class Worker:
         return decode_read_group_response(response, queue)
 
     async def _handle_message(self, message: QueueMessage) -> None:
+        token = set_trace_id(str(message.envelope.trace_id))
+        try:
+            await self._handle_traced_message(message)
+        finally:
+            reset_trace_id(token)
+
+    async def _handle_traced_message(self, message: QueueMessage) -> None:
         envelope = message.envelope
         log_extra = {"trace_id": str(envelope.trace_id)}
         self._logger.info(
