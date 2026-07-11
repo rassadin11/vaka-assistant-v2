@@ -8,6 +8,7 @@ from collections.abc import Awaitable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from enum import StrEnum
 from typing import Protocol
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -20,6 +21,8 @@ DEFAULT_DAILY_MESSAGE_LIMIT = 100
 PRO_DAILY_MESSAGE_LIMIT = 200
 DAILY_VOICE_MINUTES_LIMIT = 10
 MONTHLY_PDF_PAGES_LIMIT = 200
+LIMIT_NOTICE_DAILY_TTL_SECONDS = 3 * 86_400
+LIMIT_NOTICE_MONTHLY_TTL_SECONDS = 40 * 86_400
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +35,19 @@ class LimitsRedis(Protocol):
     def incr(self, name: str) -> Awaitable[int]: ...
 
     def expire(self, name: str, seconds: int) -> Awaitable[object]: ...
+
+    def set(
+        self, name: str, value: str, *, ex: int | None = None, nx: bool = False
+    ) -> Awaitable[object]: ...
+
+
+class LimitAxis(StrEnum):
+    """A user limit counter that can emit one approach notification per period."""
+
+    MESSAGES = "messages"
+    BUDGET = "budget"
+    VOICE = "voice"
+    PDF = "pdf"
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +106,27 @@ async def add_message(queue_redis: LimitsRedis, user_id: UUID, timezone: str) ->
             await queue_redis.expire(key, MESSAGE_COUNTER_TTL_SECONDS)
     except Exception:
         LOGGER.warning("daily message increment failed", exc_info=True)
+
+
+async def claim_limit_notice(
+    queue_redis: LimitsRedis,
+    axis: LimitAxis,
+    user_id: UUID,
+    period_key: str,
+) -> bool:
+    """Claim an approach-notice slot, returning false if Redis is unavailable."""
+
+    ttl = (
+        LIMIT_NOTICE_MONTHLY_TTL_SECONDS
+        if axis is LimitAxis.PDF
+        else LIMIT_NOTICE_DAILY_TTL_SECONDS
+    )
+    key = f"limit_notice:{axis}:{user_id}:{period_key}"
+    try:
+        return bool(await queue_redis.set(key, "1", ex=ttl, nx=True))
+    except Exception:
+        LOGGER.warning("limit approach notice claim failed", exc_info=True)
+        return False
 
 
 async def limits_snapshot(

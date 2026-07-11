@@ -23,6 +23,7 @@ from core.context import TaskContext
 from core.db import user_transaction
 from core.embeddings import EmbeddingsProvider, EmbeddingsUnavailableError
 from core.envelope import UpdateEnvelope
+from core.limits import LimitAxis, claim_limit_notice
 from core.tokens import count_tokens
 from tools.memory import vector_to_literal
 
@@ -47,6 +48,7 @@ INVALID_PDF_TEXT = "Не удалось обработать PDF-файл."
 
 LOGGER = logging.getLogger(__name__)
 DownloadFile = Callable[[str, int], Awaitable[bytes]]
+LIMIT_APPROACH_PDF_TEXT = "⚠️ Обработано {used} из {limit} страниц PDF в этом месяце"
 
 
 class QueueRedis(Protocol):
@@ -61,6 +63,10 @@ class QueueRedis(Protocol):
     def incrbyfloat(self, name: str, amount: float) -> Awaitable[float | str | bytes]: ...
 
     def expire(self, name: str, seconds: int) -> Awaitable[object]: ...
+
+    def set(
+        self, name: str, value: str, *, ex: int | None = None, nx: bool = False
+    ) -> Awaitable[object]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,10 +139,15 @@ class PdfIngestProcessor:
             await self._insert_chunks(context, document_id, chunks, vectors)
             await self._mark_ready(context, document_id, page_count)
             key = _monthly_pages_key(context)
-            if await self._queue_redis.incrby(key, page_count) == page_count:
+            used_pages = await self._queue_redis.incrby(key, page_count)
+            if used_pages == page_count:
                 # First increment this month: cap the key lifetime past the month end.
                 await self._queue_redis.expire(key, MONTHLY_KEY_TTL_SECONDS)
-            return SUCCESS_TEXT.format(pages=page_count)
+            response = SUCCESS_TEXT.format(pages=page_count)
+            if await self._claim_limit_approach_notice(context, used_pages):
+                notice = LIMIT_APPROACH_PDF_TEXT.format(used=used_pages, limit=MAX_MONTHLY_PAGES)
+                return f"{response}\n\n{notice}"
+            return response
         except _OcrUnavailableError:
             if document_id is not None:
                 await self._mark_failed(context, document_id)
@@ -248,6 +259,18 @@ class PdfIngestProcessor:
             self._logger.exception(
                 "failed to mark document ingest as failed", extra={"doc_id": document_id}
             )
+
+    async def _claim_limit_approach_notice(self, context: TaskContext, used_pages: int) -> bool:
+        """Claim the monthly PDF warning when the completed ingest reaches 80 percent."""
+
+        if used_pages < 0.8 * MAX_MONTHLY_PAGES:
+            return False
+        return await claim_limit_notice(
+            self._queue_redis,
+            LimitAxis.PDF,
+            context.user_id,
+            datetime.now(UTC).strftime("%Y%m"),
+        )
 
 
 def chunk_pages(pages: Sequence[str]) -> list[DocumentChunk]:

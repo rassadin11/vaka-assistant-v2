@@ -22,6 +22,7 @@ from tools.documents import (
 )
 from worker.documents import (
     EMBEDDINGS_UNAVAILABLE_TEXT,
+    LIMIT_APPROACH_PDF_TEXT,
     MAX_DOCUMENT_BYTES,
     MONTHLY_LIMIT_TEXT,
     OCR_PAGE_LIMIT_TEXT,
@@ -135,6 +136,7 @@ class FakePool:
 class FakeRedis:
     def __init__(self, pages: int = 0) -> None:
         self.values: dict[str, str] = {}
+        self.notice_keys: set[str] = set()
         if pages:
             self.values[_monthly_pages_key(_context())] = str(pages)
 
@@ -146,7 +148,11 @@ class FakeRedis:
         self.values[name] = str(value)
         return value
 
-    async def set(self, *_args: object, **_kwargs: object) -> bool:
+    async def set(self, name: str, _value: str, *, ex: int | None = None, nx: bool = False) -> bool:
+        del ex
+        if nx and name in self.notice_keys:
+            return False
+        self.notice_keys.add(name)
         return True
 
     async def get_for_registry(self, name: str) -> str | None:
@@ -285,6 +291,25 @@ async def test_embeddings_outage_marks_document_failed() -> None:
     assert await processor.process(_envelope(), _context()) == EMBEDDINGS_UNAVAILABLE_TEXT
     assert pool.connection.documents[0]["status"] == "failed"
     assert redis.values == {}
+
+
+async def test_pdf_limit_approach_is_appended_once_after_eighty_percent() -> None:
+    content = _pdf(["normal text " * 10])
+    pool, redis = FakePool(), FakeRedis(pages=159)
+    processor = PdfIngestProcessor(
+        pool,
+        redis,
+        lambda file_id, maximum: _download(content, file_id, maximum),
+        MockEmbeddingsProvider(),
+    )
+
+    first = await processor.process(_envelope(), _context())
+    second = await processor.process(_envelope(), _context())
+
+    assert first == (
+        f"{SUCCESS_TEXT.format(pages=1)}\n\n{LIMIT_APPROACH_PDF_TEXT.format(used=160, limit=200)}"
+    )
+    assert second == SUCCESS_TEXT.format(pages=1)
 
 
 async def test_document_search_list_delete_and_registration() -> None:

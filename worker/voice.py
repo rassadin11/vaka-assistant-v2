@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from datetime import UTC, datetime
@@ -13,10 +14,11 @@ import asyncpg
 
 from core.context import TaskContext
 from core.envelope import UpdateEnvelope
-from core.limits import message_limit_reached
+from core.limits import LimitAxis, claim_limit_notice, message_limit_reached
 from core.spend import BudgetState, add_spend, budget_state, daily_budget_rub, get_spent_rub
 from core.stt import STTProvider, STTUnavailableError
 from core.usage_store import save_stt_usage
+from worker.app import SendReplyCallback
 from worker.documents import MAX_DOCUMENT_BYTES, DownloadFile, QueueRedis
 from worker.processor import ContextualProcessor
 
@@ -37,6 +39,7 @@ MESSAGE_LIMIT_TEXT = (
     "На сегодня лимит сообщений исчерпан. Продолжим после полуночи — "
     "или напишите /feedback, если лимита не хватает"
 )
+LIMIT_APPROACH_VOICE_TEXT = "⚠️ Использовано {used} из {limit} минут голосовых на сегодня"
 
 LOGGER = logging.getLogger(__name__)
 
@@ -52,6 +55,7 @@ class VoiceProcessor:
         stt_provider: STTProvider | None,
         inner: ContextualProcessor,
         *,
+        send: SendReplyCallback | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._app_pool = app_pool
@@ -59,7 +63,9 @@ class VoiceProcessor:
         self._download_file = download_file
         self._stt_provider = stt_provider
         self._inner = inner
+        self._send = send
         self._logger = logger if logger is not None else LOGGER
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     async def process(self, envelope: UpdateEnvelope, context: TaskContext) -> str | None:
         """Apply limits, transcribe, and pass the rewritten text envelope to the agent."""
@@ -94,7 +100,8 @@ class VoiceProcessor:
             if not result.text.strip():
                 return EMPTY_TRANSCRIPT_TEXT
 
-            await self._increment_minutes(context, minutes)
+            used_minutes = await self._increment_minutes(context, minutes)
+            self._schedule_limit_approach_notification(context, used_minutes)
             if await self._save_usage(context, result.cost_usd):
                 await add_spend(
                     self._queue_redis,
@@ -125,10 +132,41 @@ class VoiceProcessor:
         current = int(raw_text or "0")
         return current + minutes <= MAX_DAILY_VOICE_MINUTES
 
-    async def _increment_minutes(self, context: TaskContext, minutes: int) -> None:
+    async def _increment_minutes(self, context: TaskContext, minutes: int) -> int:
         value = await self._queue_redis.incrby(_daily_minutes_key(context), minutes)
         if value == minutes:
             await self._queue_redis.expire(_daily_minutes_key(context), VOICE_COUNTER_TTL_SECONDS)
+        return value
+
+    def _schedule_limit_approach_notification(
+        self, context: TaskContext, used_minutes: int
+    ) -> None:
+        """Queue a UTC-day voice warning without delaying transcription delivery."""
+
+        if self._send is None or used_minutes < 0.8 * MAX_DAILY_VOICE_MINUTES:
+            return
+        task = asyncio.create_task(self._notify_limit_approach(context, used_minutes))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _notify_limit_approach(self, context: TaskContext, used_minutes: int) -> None:
+        """Claim and send the once-per-UTC-day voice approach warning."""
+
+        try:
+            if self._send is None:
+                return
+            period = datetime.now(UTC).strftime("%Y%m%d")
+            if await claim_limit_notice(
+                self._queue_redis, LimitAxis.VOICE, context.user_id, period
+            ):
+                await self._send(
+                    context.chat_id,
+                    LIMIT_APPROACH_VOICE_TEXT.format(
+                        used=used_minutes, limit=MAX_DAILY_VOICE_MINUTES
+                    ),
+                )
+        except Exception:
+            self._logger.warning("voice limit approach notification failed", exc_info=True)
 
     async def _budget_state(self, context: TaskContext) -> BudgetState:
         """Read the daily budget once before any voice download or STT work."""

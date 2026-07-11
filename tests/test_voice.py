@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -16,6 +17,7 @@ from core.stt import MockSTTProvider, STTResult, STTUnavailableError
 from worker.voice import (
     DAILY_LIMIT_TEXT,
     EMPTY_TRANSCRIPT_TEXT,
+    LIMIT_APPROACH_VOICE_TEXT,
     MAX_DAILY_VOICE_MINUTES,
     MESSAGE_LIMIT_TEXT,
     STT_UNAVAILABLE_TEXT,
@@ -47,6 +49,13 @@ class FakeRedis:
 
     async def expire(self, name: str, seconds: int) -> bool:
         self.expiries[name] = seconds
+        return True
+
+    async def set(self, name: str, value: str, *, ex: int | None = None, nx: bool = False) -> bool:
+        del value, ex
+        if nx and name in self.values:
+            return False
+        self.values[name] = "1"
         return True
 
 
@@ -276,3 +285,35 @@ async def test_message_limit_refuses_before_download_or_stt() -> None:
     assert await processor.process(_envelope(), context) == MESSAGE_LIMIT_TEXT
     assert downloads == 0
     assert provider.calls == 0
+
+
+async def test_voice_limit_approach_notifies_once_after_reaching_eighty_percent() -> None:
+    context = _context()
+    redis = FakeRedis({_daily_minutes_key(context): "7"})
+    sent: list[tuple[int, str]] = []
+
+    async def send(chat_id: int, text: str) -> None:
+        sent.append((chat_id, text))
+
+    processor = VoiceProcessor(
+        object(),
+        redis,
+        lambda _file_id, _maximum: _voice_bytes(),
+        MockSTTProvider.scripted(
+            [STTResult("first", 1, Decimal(0)), STTResult("second", 1, Decimal(0))]
+        ),
+        RecordingInner(),  # type: ignore[arg-type]
+        send=send,
+    )
+
+    assert await processor.process(_envelope(), context) == "agent reply"
+    await asyncio.sleep(0)
+    assert await processor.process(_envelope(), context) == "agent reply"
+    await asyncio.sleep(0)
+
+    assert sent == [
+        (
+            context.chat_id,
+            LIMIT_APPROACH_VOICE_TEXT.format(used=8, limit=MAX_DAILY_VOICE_MINUTES),
+        )
+    ]

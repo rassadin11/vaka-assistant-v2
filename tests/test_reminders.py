@@ -158,14 +158,14 @@ async def test_create_reminder_uses_local_time_for_cron_and_utc_storage() -> Non
     result = await _create_reminder(
         pool,
         _context(),
-        CreateReminderArgs(text="Позвонить", remind_at="2026-07-11T23:30:00", repeat="weekly"),
+        CreateReminderArgs(text="Позвонить", remind_at="2027-07-10T23:30:00", repeat="weekly"),
     )
 
     row = pool.connection.tasks[0]
     assert result.status == "ok"
     assert row["cron_expr"] == "30 23 * * 6"
-    assert row["next_run_at"] == datetime(2026, 7, 11, 20, 30, tzinfo=UTC)
-    assert result.payload["next_run_at"] == "2026-07-11T23:30:00+03:00"
+    assert row["next_run_at"] == datetime(2027, 7, 10, 20, 30, tzinfo=UTC)
+    assert result.payload["next_run_at"] == "2027-07-10T23:30:00+03:00"
 
 
 async def test_create_reminder_interprets_naive_time_and_truncates_title() -> None:

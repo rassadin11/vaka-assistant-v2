@@ -163,6 +163,7 @@ async def _run() -> None:
             download_file,
             _stt_provider_from_env(),
             inner,
+            send=send_reply,
         )
         confirmation_handler = ConfirmationProcessor(
             queue_redis,

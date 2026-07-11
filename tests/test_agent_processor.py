@@ -18,8 +18,14 @@ from core.envelope import UpdateEnvelope
 from core.limits import message_key
 from core.llm import LLMMessage, LLMResponse, ToolDefinition
 from core.llm_mock import MockLLMProvider, mock_text_response, mock_tool_call_response
+from core.spend import spend_key
 from core.tools_dispatch import StaticToolDispatcher
-from worker.agent_processor import MESSAGE_LIMIT_TEXT, SOFT_REFUSE_TEXT, AgentProcessor
+from worker.agent_processor import (
+    LIMIT_APPROACH_BUDGET_TEXT,
+    MESSAGE_LIMIT_TEXT,
+    SOFT_REFUSE_TEXT,
+    AgentProcessor,
+)
 
 
 def _context() -> TaskContext:
@@ -644,3 +650,106 @@ async def test_background_budget_skip_notifies_only_once_per_local_day() -> None
             "продолжится завтра",
         )
     ]
+
+
+async def test_completed_text_task_notifies_for_independent_budget_and_message_axes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _context()
+
+    class NoticeRedis:
+        def __init__(self) -> None:
+            self.values = {
+                message_key(context.user_id, context.timezone): "79",
+                spend_key(context.user_id, context.timezone): "12",
+            }
+
+        async def get(self, name: str) -> str | None:
+            return self.values.get(name)
+
+        async def incr(self, name: str) -> int:
+            value = int(self.values.get(name, "0")) + 1
+            self.values[name] = str(value)
+            return value
+
+        async def incrbyfloat(self, name: str, amount: float | Decimal) -> Decimal:
+            value = Decimal(self.values.get(name, "0")) + Decimal(str(amount))
+            self.values[name] = str(value)
+            return value
+
+        async def expire(self, _name: str, _seconds: int) -> bool:
+            return True
+
+        async def set(
+            self, name: str, _value: str, *, ex: int | None = None, nx: bool = False
+        ) -> bool:
+            del ex
+            if nx and name in self.values:
+                return False
+            self.values[name] = "1"
+            return True
+
+    async def fake_load(*_args: object) -> DialogHistory:
+        return DialogHistory(summary=None, tail=[])
+
+    async def fake_save(*_args: object) -> list[UUID]:
+        return []
+
+    sent: list[tuple[int, str]] = []
+
+    async def send(chat_id: int, text: str) -> None:
+        sent.append((chat_id, text))
+
+    monkeypatch.setattr("worker.agent_processor.load_dialog", fake_load)
+    monkeypatch.setattr("worker.agent_processor.save_messages", fake_save)
+    monkeypatch.setattr("worker.agent_processor.save_usage", _save_usage)
+    processor = AgentProcessor(
+        MockLLMProvider.scripted([mock_text_response("first"), mock_text_response("second")]),
+        StaticToolDispatcher([], {}),
+        AgentLoopConfig(),
+        app_pool=object(),  # type: ignore[arg-type]
+        send=send,
+        queue_redis=NoticeRedis(),
+    )
+
+    assert await processor.process(_envelope(), context) == "first"
+    await asyncio.sleep(0)
+    assert await processor.process(_envelope(), context) == "second"
+    await asyncio.sleep(0)
+
+    assert sent == [
+        (context.chat_id, LIMIT_APPROACH_BUDGET_TEXT),
+        (context.chat_id, "⚠️ Использовано 80 из 100 сообщений на сегодня"),
+    ]
+
+
+async def test_budget_limit_approach_notifies_above_one_hundred_percent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_load(*_args: object) -> DialogHistory:
+        return DialogHistory(summary=None, tail=[])
+
+    async def fake_save(*_args: object) -> list[UUID]:
+        return []
+
+    sent: list[tuple[int, str]] = []
+
+    async def send(chat_id: int, text: str) -> None:
+        sent.append((chat_id, text))
+
+    monkeypatch.setattr("worker.agent_processor.load_dialog", fake_load)
+    monkeypatch.setattr("worker.agent_processor.save_messages", fake_save)
+    monkeypatch.setattr("worker.agent_processor.save_usage", _save_usage)
+    processor = AgentProcessor(
+        MockLLMProvider.scripted([mock_text_response("answer")]),
+        StaticToolDispatcher([], {}),
+        AgentLoopConfig(),
+        app_pool=object(),  # type: ignore[arg-type]
+        send=send,
+        queue_redis=_BudgetRedis("16"),
+    )
+
+    assert await processor.process(_envelope(), _context()) == "answer"
+    await asyncio.sleep(0)
+
+    assert sent == [(_context().chat_id, LIMIT_APPROACH_BUDGET_TEXT)]

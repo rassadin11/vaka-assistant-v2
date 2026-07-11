@@ -10,9 +10,13 @@ import pytest
 
 from core.limits import (
     DAILY_VOICE_MINUTES_LIMIT,
+    LIMIT_NOTICE_DAILY_TTL_SECONDS,
+    LIMIT_NOTICE_MONTHLY_TTL_SECONDS,
     MESSAGE_COUNTER_TTL_SECONDS,
     MONTHLY_PDF_PAGES_LIMIT,
+    LimitAxis,
     add_message,
+    claim_limit_notice,
     daily_message_limit,
     limits_snapshot,
     message_key,
@@ -27,6 +31,7 @@ class FakeRedis:
     def __init__(self, values: dict[str, str] | None = None) -> None:
         self.values = values or {}
         self.expire_calls: list[tuple[str, int]] = []
+        self.set_calls: list[tuple[str, int | None, bool]] = []
 
     async def get(self, name: str) -> str | None:
         return self.values.get(name)
@@ -40,12 +45,24 @@ class FakeRedis:
         self.expire_calls.append((name, seconds))
         return True
 
+    async def set(self, name: str, value: str, *, ex: int | None = None, nx: bool = False) -> bool:
+        del value
+        self.set_calls.append((name, ex, nx))
+        if nx and name in self.values:
+            return False
+        self.values[name] = "1"
+        return True
+
 
 class FailingRedis(FakeRedis):
     async def get(self, name: str) -> str | None:
         raise ConnectionError(name)
 
     async def incr(self, name: str) -> int:
+        raise ConnectionError(name)
+
+    async def set(self, name: str, value: str, *, ex: int | None = None, nx: bool = False) -> bool:
+        del value, ex, nx
         raise ConnectionError(name)
 
 
@@ -114,3 +131,23 @@ async def test_limits_snapshot_reads_all_existing_counter_key_formats() -> None:
     assert snapshot.voice_minutes.limit == DAILY_VOICE_MINUTES_LIMIT
     assert snapshot.pdf_pages.used == 44
     assert snapshot.pdf_pages.limit == MONTHLY_PDF_PAGES_LIMIT
+
+
+async def test_limit_notice_claim_is_deduplicated_per_axis_period_and_uses_fixed_ttls() -> None:
+    redis = FakeRedis()
+
+    assert await claim_limit_notice(redis, LimitAxis.MESSAGES, USER_ID, "20260711")
+    assert not await claim_limit_notice(redis, LimitAxis.MESSAGES, USER_ID, "20260711")
+    assert await claim_limit_notice(redis, LimitAxis.BUDGET, USER_ID, "20260711")
+    assert await claim_limit_notice(redis, LimitAxis.PDF, USER_ID, "202607")
+
+    assert redis.set_calls == [
+        (f"limit_notice:messages:{USER_ID}:20260711", LIMIT_NOTICE_DAILY_TTL_SECONDS, True),
+        (f"limit_notice:messages:{USER_ID}:20260711", LIMIT_NOTICE_DAILY_TTL_SECONDS, True),
+        (f"limit_notice:budget:{USER_ID}:20260711", LIMIT_NOTICE_DAILY_TTL_SECONDS, True),
+        (f"limit_notice:pdf:{USER_ID}:202607", LIMIT_NOTICE_MONTHLY_TTL_SECONDS, True),
+    ]
+
+
+async def test_limit_notice_claim_fails_open_when_redis_is_unavailable() -> None:
+    assert not await claim_limit_notice(FailingRedis(), LimitAxis.VOICE, USER_ID, "20260711")

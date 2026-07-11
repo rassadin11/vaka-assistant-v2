@@ -29,7 +29,14 @@ from core.dialog_store import (
 )
 from core.embeddings import EmbeddingsProvider, EmbeddingsUnavailableError
 from core.envelope import UpdateEnvelope
-from core.limits import LimitsRedis, add_message, message_limit_reached
+from core.limits import (
+    LimitAxis,
+    LimitsRedis,
+    add_message,
+    claim_limit_notice,
+    limits_snapshot,
+    message_limit_reached,
+)
 from core.llm import LLMMessage, LLMProvider
 from core.prompt import PROMPT_VERSION
 from core.queue import QueueName
@@ -59,6 +66,10 @@ SOFT_REFUSE_TEXT = (
 MESSAGE_LIMIT_TEXT = (
     "На сегодня лимит сообщений исчерпан. Продолжим после полуночи — "
     "или напишите /feedback, если лимита не хватает"
+)
+LIMIT_APPROACH_BUDGET_TEXT = (
+    "⚠️ Использовано 80% дневного бюджета ассистента — после превышения возможности "
+    "на сегодня будут ограничены"
 )
 
 
@@ -181,6 +192,7 @@ class AgentProcessor:
             recorder.records,
         )
         await self._add_recorded_spend(context, recorder.records)
+        self._schedule_limit_approach_notifications(envelope, context)
 
         if built.needs_summarization and built.trimmed:
             upto_message_id = history.tail[len(built.trimmed) - 1].id
@@ -283,6 +295,50 @@ class AgentProcessor:
             return
         total = sum((record.cost_usd for record in records), Decimal(0))
         await add_spend(self._queue_redis, context.user_id, context.timezone, total)
+
+    def _schedule_limit_approach_notifications(
+        self, envelope: UpdateEnvelope, context: TaskContext
+    ) -> None:
+        """Queue post-reply limit warnings without delaying a completed task."""
+
+        if self._queue_redis is None:
+            return
+        task = asyncio.create_task(self._notify_limit_approach(envelope, context))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _notify_limit_approach(self, envelope: UpdateEnvelope, context: TaskContext) -> None:
+        """Send independent local-day budget and message approach warnings."""
+
+        try:
+            if self._queue_redis is None:
+                return
+            snapshot = await limits_snapshot(
+                self._queue_redis, context.user_id, context.plan, context.timezone
+            )
+            period = datetime.now(ZoneInfo(context.timezone)).strftime("%Y%m%d")
+            if (
+                envelope.kind in {"text", "agent_task"}
+                and snapshot.budget_rub.used >= Decimal("0.8") * snapshot.budget_rub.limit
+                and await claim_limit_notice(
+                    self._queue_redis, LimitAxis.BUDGET, context.user_id, period
+                )
+            ):
+                await self._send(context.chat_id, LIMIT_APPROACH_BUDGET_TEXT)
+            if (
+                envelope.kind == "text"
+                and snapshot.messages.used >= Decimal("0.8") * snapshot.messages.limit
+                and await claim_limit_notice(
+                    self._queue_redis, LimitAxis.MESSAGES, context.user_id, period
+                )
+            ):
+                await self._send(
+                    context.chat_id,
+                    f"⚠️ Использовано {snapshot.messages.used} из {snapshot.messages.limit} "
+                    "сообщений на сегодня",
+                )
+        except Exception:
+            self._logger.warning("limit approach notification failed", exc_info=True)
 
 
 def _dynamics(timezone: str, plan: str) -> UserDynamics:
