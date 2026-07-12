@@ -1,0 +1,12 @@
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: telegram-admin
+    receivers:
+      - uid: telegram-admin
+        type: telegram
+        settings:
+          bottoken: $TELEGRAM_ALERT_BOT_TOKEN
+          chatid: $TELEGRAM_ALERT_CHAT_ID
+          message: "{{ range .Alerts }}{{ .Labels.alertname }}: {{ .Status }}, значение: {{ .ValueString }}{{ end }}"

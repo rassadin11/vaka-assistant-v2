@@ -82,6 +82,13 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
 
+  blackbox:
+    image: prom/blackbox-exporter:latest
+    # The image defaults to /etc/blackbox_exporter/config.yml; point it at our mount.
+    command: ["--config.file=/config/blackbox.yml"]
+    volumes:
+      - ./blackbox/blackbox.yml:/config/blackbox.yml:ro
+
   grafana:
     image: grafana/grafana:latest
     depends_on:
@@ -91,6 +98,8 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
+      TELEGRAM_ALERT_BOT_TOKEN: ${TELEGRAM_ALERT_BOT_TOKEN:-}
+      TELEGRAM_ALERT_CHAT_ID: ${TELEGRAM_ALERT_CHAT_ID:-}
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
