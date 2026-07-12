@@ -27,7 +27,9 @@ groups:
               range: false
               refId: A
         for: 5m
-        noDataState: NoData
+        # No traffic/worker metrics is not an incident by itself (TargetDown
+        # covers unavailability) — avoid DatasourceNoData noise.
+        noDataState: OK
         execErrState: Error
         annotations:
           summary: "InteractiveQueueBacklog: очередь interactive переполнена, значение {{ $values.A.Value }}"
@@ -54,7 +56,7 @@ groups:
               range: false
               refId: A
         for: 10m
-        noDataState: NoData
+        noDataState: OK
         execErrState: Error
         annotations:
           summary: "LLM429RatioHigh: высокая доля ответов 429, значение {{ $values.A.Value }}"
@@ -80,7 +82,7 @@ groups:
               maxDataPoints: 43200
               range: false
               refId: A
-        noDataState: NoData
+        noDataState: OK
         execErrState: Error
         annotations:
           summary: "DailyLLMCostHigh: дневные расходы LLM выше порога, значение {{ $values.A.Value }}"
@@ -98,7 +100,9 @@ groups:
             datasourceUid: prometheus
             model:
               editorMode: code
-              expr: up == 0
+              # "== bool": series value must be non-zero when firing — a plain
+              # "== 0" filter returns value 0, which Grafana treats as Normal.
+              expr: up == bool 0
               instant: true
               interval: ""
               intervalMs: 1000
@@ -125,7 +129,7 @@ groups:
             datasourceUid: prometheus
             model:
               editorMode: code
-              expr: probe_success{instance=~"http://searxng:8080/healthz|postgres:5432"} == 0
+              expr: probe_success{instance=~"http://searxng:8080/healthz|postgres:5432"} == bool 0
               instant: true
               interval: ""
               intervalMs: 1000
@@ -153,7 +157,7 @@ groups:
             datasourceUid: prometheus
             model:
               editorMode: code
-              expr: probe_success{instance="http://embeddings:8000/healthz"} == 0
+              expr: probe_success{instance="http://embeddings:8000/healthz"} == bool 0
               instant: true
               interval: ""
               intervalMs: 1000
