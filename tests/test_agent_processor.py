@@ -170,6 +170,35 @@ async def test_context_uses_loaded_summary_tail_and_trusted_dynamics(
     assert captured[0][0].content == "new request"
 
 
+async def test_custom_prompt_version_is_persisted_in_assistant_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[list[MessageDraft]] = []
+
+    async def fake_load(*_args: object) -> DialogHistory:
+        return DialogHistory(summary=None, tail=[])
+
+    async def fake_save(
+        _pool: object,
+        _user_id: UUID,
+        drafts: list[MessageDraft],
+        _trace: UUID,
+    ) -> list[UUID]:
+        captured.append(drafts)
+        return []
+
+    monkeypatch.setattr("worker.agent_processor.load_dialog", fake_load)
+    monkeypatch.setattr("worker.agent_processor.save_messages", fake_save)
+    monkeypatch.setattr("worker.agent_processor.save_usage", _save_usage)
+    processor = _processor(
+        MockLLMProvider.scripted([mock_text_response("answer")]),
+        prompt_version="v2-flash",
+    )
+
+    assert await processor.process(_envelope(), _context()) == "answer"
+    assert captured[0][-1].meta == {"prompt_version": "v2-flash", "stop_reason": "answer"}
+
+
 async def test_voice_transcript_persists_voice_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[list[MessageDraft]] = []
 

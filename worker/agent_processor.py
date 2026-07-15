@@ -96,6 +96,7 @@ class AgentProcessor:
         logger: logging.Logger | None = None,
         embeddings: EmbeddingsProvider | None = None,
         queue_redis: AgentRedis | None = None,
+        prompt_version: str = PROMPT_VERSION,
     ) -> None:
         self._provider = provider
         self._dispatcher = dispatcher
@@ -105,6 +106,7 @@ class AgentProcessor:
         self._logger = logger if logger is not None else LOGGER
         self._embeddings = embeddings
         self._queue_redis = queue_redis
+        self._prompt_version = prompt_version
         self._background_tasks: set[asyncio.Task[None]] = set()
 
     async def process(self, envelope: UpdateEnvelope, context: TaskContext) -> str | None:
@@ -152,6 +154,7 @@ class AgentProcessor:
             summary=history.summary,
             tail=to_llm_messages(history.tail),
             lean=envelope.kind == "text" and state is BudgetState.SHORT_CONTEXT,
+            prompt_version=self._prompt_version,
         )
         messages = [
             built.system_message,
@@ -181,7 +184,7 @@ class AgentProcessor:
             MessageDraft(
                 role="assistant",
                 content=reply_text,
-                meta={"prompt_version": PROMPT_VERSION, "stop_reason": result.stop_reason},
+                meta={"prompt_version": self._prompt_version, "stop_reason": result.stop_reason},
             ),
         ]
         await save_messages(self._app_pool, context.user_id, drafts, context.trace_id)

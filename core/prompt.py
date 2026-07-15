@@ -90,3 +90,12 @@ def get_prompt(version: str) -> str:
         raise ValueError(
             f"Unknown prompt version {version!r}. Known versions: {known_versions}."
         ) from exc
+
+
+MODEL_PROMPT_VERSIONS: dict[str, str] = {"deepseek/deepseek-v4-flash": "v2-flash"}
+
+
+def prompt_version_for_model(model: str) -> str:
+    """Return the prompt version tuned for a model, defaulting to PROMPT_VERSION."""
+
+    return MODEL_PROMPT_VERSIONS.get(model, PROMPT_VERSION)

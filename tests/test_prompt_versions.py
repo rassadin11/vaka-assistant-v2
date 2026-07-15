@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from core.context_manager import UserDynamics, build_context
-from core.prompt import PROMPTS, STATIC_CORE, get_prompt
+from core.prompt import PROMPTS, STATIC_CORE, get_prompt, prompt_version_for_model
 from evals.scenarios_v1 import build_scenarios
 
 _EXPECTED_V1_IDS = [
@@ -50,6 +50,11 @@ def test_prompt_registry_returns_v1_and_rejects_unknown_versions() -> None:
     assert get_prompt("v1") is STATIC_CORE
     with pytest.raises(ValueError, match="Known versions: v1, v2-flash"):
         get_prompt("unknown")
+
+
+def test_prompt_version_for_model_uses_mapped_or_default_version() -> None:
+    assert prompt_version_for_model("deepseek/deepseek-v4-flash") == "v2-flash"
+    assert prompt_version_for_model("deepseek/deepseek-chat") == "v1"
 
 
 def test_versioned_scenario_builds_only_change_system_message() -> None:

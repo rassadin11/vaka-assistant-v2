@@ -37,6 +37,7 @@ from core.llm_resilient import ResilientLLMProvider
 from core.logging_setup import setup_logging
 from core.metrics import active_metrics
 from core.model_router import RouteRequest, StaticModelRouter
+from core.prompt import prompt_version_for_model
 from core.queue import enqueue, redis_settings_from_env, stream_keys
 from core.registry_dispatcher import RegistryToolDispatcher
 from core.secrets import EnvSecretsProvider, SecretNotFoundError
@@ -405,6 +406,7 @@ def _active_inner_processor(
     )
     if route.model != settings.model:
         raise RuntimeError("The routed model must match the configured OpenRouter model.")
+    prompt_version = prompt_version_for_model(settings.model)
     agent_config = AgentLoopConfig.from_env()
     agent_config = replace(
         agent_config,
@@ -414,7 +416,11 @@ def _active_inner_processor(
     fallback_provider = (
         OpenRouterProvider(replace(settings, model=fallback_model)) if fallback_model else None
     )
-    logging.getLogger(__name__).info("inner processor active: agent")
+    logging.getLogger(__name__).info(
+        "inner processor active: agent (model=%s, prompt_version=%s)",
+        settings.model,
+        prompt_version,
+    )
     provider = ResilientLLMProvider(
         OpenRouterProvider(settings),
         queue_redis,
@@ -431,6 +437,7 @@ def _active_inner_processor(
         send=send_reply,
         embeddings=embeddings,
         queue_redis=queue_redis,
+        prompt_version=prompt_version,
     )
 
 
