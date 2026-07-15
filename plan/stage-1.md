@@ -90,6 +90,31 @@
 
 **DoD 1.10.2:** роль наполнена; Molecule converge+idempotence зелёные в CI; ansible-lint(production)/yamllint/syntax зелёные; секретов нет; живой прогон на VPS: deploy заходит по ключу с sudo, sshd/ufw/fail2ban/unattended-upgrades/sysctl применены, повторный прогон 0 changed, доступ не потерян. **Принято 2026-07-16 (коммиты ef43c37 + 45c3692):** живой прогон под root — 13 changed; deploy по ключу + `sudo -n`; root по ключу как fallback; пароль отклонён; ufw active (22/80/443), fail2ban sshd active, sysctl 1024/1, tz Europe/Moscow, эффективный sshd подтверждены на 31.76.15.130; **второй прогон под deploy через sudo — 0 changed**. Тех-долг: `ansible_virtualization_type` → `ansible_facts['virtualization_type']` до ansible-core 2.24.
 
+#### Детализация 1.10.3 — роль `docker` (Docker Engine + compose) (2026-07-16, перед кодом)
+
+**Объём:** наполнить `roles/docker` реальными задачами (в 1.10.1 — заглушка). Роль `app` остаётся заглушкой (её черёд — 1.10.4).
+
+**Решения:**
+- **Официальный репозиторий Docker**, не `docker.io` из Ubuntu. GPG-ключ в `/etc/apt/keyrings/docker.asc` + apt-репозиторий `download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable`; пакеты `docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-buildx-plugin`, `docker-compose-plugin` пиновыми версиями из group_vars (`docker_version`, `docker_compose_plugin_version`) — воспроизводимость.
+- **deploy в группе `docker`** (решение 1.10.2: приложение — в контейнерах, deploy управляет docker без sudo). Осознаём: членство в docker-группе = root-эквивалент; для одиночного сервера беты приемлемо (у deploy уже есть NOPASSWD-sudo). Правка группы применяется к новым сессиям (в живой приёмке проверять из свежего SSH-логина).
+- **daemon.json** с прод-настройками: ротация логов (`log-driver: json-file`, `max-size: 10m`, `max-file: 3` — иначе логи контейнеров съедят диск), `live-restore: true` (контейнеры переживают рестарт демона). Хендлер restart docker при изменении файла.
+- **Несовместимое с Molecule-контейнером** (запуск/рестарт `dockerd` — в контейнере нет systemd-докера, docker-in-docker не нужен) гейтить по `virtualization_type`, как в base. Установка пакетов/репозитория/GPG/группы/daemon.json — выполняются и в контейнере (идемпотентность проверяется), старт демона — только на реальном VPS.
+
+**Задачи роли `docker` (tasks/main.yml, теги, handler restart docker):**
+1. Зависимости репозитория: `ca-certificates`, `curl`, `gnupg` (идемпотентно, часть уже из base).
+2. `/etc/apt/keyrings` (0755) + GPG-ключ Docker через `ansible.builtin.get_url` в `/etc/apt/keyrings/docker.asc` (0644).
+3. Apt-репозиторий Docker через `ansible.builtin.apt_repository` (`signed-by=/etc/apt/keyrings/docker.asc`).
+4. `apt` update + установка пяти пакетов пиновыми версиями (`docker-ce={{ docker_version }}` и т.д.; `docker-compose-plugin={{ docker_compose_plugin_version }}`).
+5. `/etc/docker/daemon.json` (`copy` content или `template`, 0644, валидный JSON) → notify Restart docker.
+6. deploy в группу `docker` (`ansible.builtin.user` с `append: true`, `groups: docker`).
+7. (гейт) сервис `docker` enabled + started.
+
+**Molecule:** converge применяет site.yml (base + docker с реальными задачами, app-заглушка); проверяем converge + **idempotence 0 changed** (гейт старта демона держит идемпотентность в контейнере). `verify.yml` дописать контейнерно-совместимыми проверками: бинарь `docker` присутствует, `docker compose version` (plugin поставлен), deploy состоит в группе `docker`, `/etc/docker/daemon.json` существует и парсится как JSON.
+
+**Живая приёмка на 31.76.15.130 (после зелёного Molecule/CI):** прогон роли под `deploy` с `--become`; проверить: `docker --version` и `docker compose version` нужных версий; `systemctl is-active docker` = active; из **свежего** SSH-логина `docker ps` работает без sudo (членство в группе); daemon.json применён (ротация логов); повторный прогон 0 changed.
+
+**DoD 1.10.3:** роль наполнена; Molecule converge+idempotence зелёные в CI; ansible-lint(production)/yamllint/syntax зелёные; секретов нет; на VPS: Docker Engine + compose-plugin нужных версий, демон active, deploy управляет docker без sudo, повторный прогон 0 changed.
+
 ### 1.11. Прод-compose + Caddy + webhook  ≈ 1–1.5 дня
 - **1.11.1** `infra/compose.prod.yml`: контейнеры `gateway`, `worker`, `scheduler` (сейчас в dev — процессы на хосте!) + инфра (postgres, pgbouncer, redis×2, infisical, searxng, embeddings, prometheus, grafana, blackbox). Отличия от dev: `restart: unless-stopped`, resource limits, healthcheck+`depends_on`, без биндов на localhost, прод-профили. ≈ 0.5 дня. **Архитектурное — состав/топологию утверждает fable.**
 - **1.11.2** Caddy: TLS (Let's Encrypt по домену Б2), маршруты `/webhook/{secret_path}` → gateway (секретный путь поверх secret_token), `/oauth/callback` (задел 4.7), `/tribute/webhook` (задел этап 7); security headers, JSON access-логи (trace_id, этап 6), лимит размера тела. ≈ 0.5 дня.

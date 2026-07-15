@@ -1,5 +1,5 @@
 ---
-- name: Verify base role
+- name: Verify base and docker roles
   hosts: all
   gather_facts: false
   tasks:
@@ -44,3 +44,57 @@
       ansible.builtin.assert:
         that:
           - deploy_sudoers_dropin.stat.exists
+
+    - name: Check Docker CLI is available
+      ansible.builtin.command: docker --version
+      register: docker_version_command
+      changed_when: false
+      failed_when: false
+
+    - name: Verify Docker CLI is available
+      ansible.builtin.assert:
+        that:
+          - docker_version_command.rc == 0
+
+    - name: Check Docker Compose plugin is available
+      ansible.builtin.command: docker compose version
+      register: docker_compose_version_command
+      changed_when: false
+      failed_when: false
+
+    - name: Verify Docker Compose plugin is available
+      ansible.builtin.assert:
+        that:
+          - docker_compose_version_command.rc == 0
+
+    - name: Get Docker group entry
+      ansible.builtin.getent:
+        database: group
+        key: docker
+
+    - name: Verify deploy user belongs to Docker group
+      ansible.builtin.assert:
+        that:
+          - "'deploy' in ansible_facts.getent_group.docker[2]"
+
+    - name: Check Docker daemon configuration
+      ansible.builtin.stat:
+        path: /etc/docker/daemon.json
+      register: docker_daemon_config
+
+    - name: Verify Docker daemon configuration exists
+      ansible.builtin.assert:
+        that:
+          - docker_daemon_config.stat.exists
+
+    - name: Read Docker daemon configuration
+      ansible.builtin.slurp:
+        src: /etc/docker/daemon.json
+      register: docker_daemon_config_contents
+
+    - name: Verify Docker daemon configuration is valid JSON
+      ansible.builtin.assert:
+        that:
+          - >-
+            (docker_daemon_config_contents.content | b64decode | from_json)
+            is mapping

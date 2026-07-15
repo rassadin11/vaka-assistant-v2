@@ -1,2 +1,8 @@
 ---
-[]
+- name: Restart docker
+  ansible.builtin.service:
+    name: docker
+    state: restarted
+  when: >-
+    ansible_virtualization_type not in
+    ['docker', 'container', 'containerd', 'lxc', 'podman']
