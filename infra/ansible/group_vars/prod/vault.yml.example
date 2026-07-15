@@ -1,0 +1,5 @@
+---
+# Copy this file to vault.yml and encrypt it with ansible-vault before use.
+infisical_machine_identity_client_id: REPLACE_WITH_INFISICAL_CLIENT_ID
+infisical_machine_identity_client_secret: REPLACE_WITH_INFISICAL_CLIENT_SECRET
+infisical_address: https://INFISICAL_HOSTNAME

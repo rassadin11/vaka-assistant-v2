@@ -24,13 +24,13 @@
 Особенность приёмки всего 1B: инфраструктурный код (Ansible, compose.prod, Caddy, deploy-workflow) **нельзя полностью проверить без реального VPS** — приёмка частично ручная на сервере. До аренды сервера задачи пишутся «вслепую» по спеке, финальная приёмка — после провижининга.
 
 ### Блокеры за владельцем (календарные, на критическом пути)
-- **Б1. Выбор хостера + юрисдикция (обсуждение №3, 152-ФЗ).** Блокирует 1.9/1.10 и определяет требования к privacy policy. Без него сервер выбирать рано.
+- **Б1. Выбор хостера + юрисдикция (обсуждение №3, 152-ФЗ) — РЕШЕНО (2026-07-15): всё за рубежом (EU/Финляндия) на бету как осознанный риск.** Релей не нужен (не-РФ аккаунт OpenRouter + не-РФ IP сервера). 152-ФЗ localization (primary Postgres в РФ) — долг миграции к публичному запуску; юр-заключение до паблика. Детали и режим трансграничной передачи — обсуждение №3 мастер-плана. Осталось: выбрать конкретного хостера/регион и способ оплаты.
 - **Б2. Домен + опубликованная privacy policy (0.6/№10).** Блокирует TLS и webhook-режим (1.11). Домен нужен для Let's Encrypt и для `set-webhook`.
 - **Б3. Выбор S3-провайдера для бэкапов** (у другого провайдера, чем сервер). Блокирует 1.13.
 - **Б4. Перевыпуск засветившихся ключей** (боевой токен бота, OpenRouter-ключ) — до go-live, обязательно (см. блокеры progress.md).
 
 ### 1.9. Сервер + hardening
-- **1.9.1** [владелец] Аренда сервера по Б1: 4–6 vCPU / 16 GB / NVMe 100+ GB, Ubuntu 24.04 LTS. *Ожидание владельца.*
+- **1.9.1** [владелец] Аренда сервера по Б1: 4–6 vCPU / 16 GB / NVMe 100+ GB, Ubuntu 24.04 LTS. **Выбрано и выдано (2026-07-15): xorek.cloud FI-R9-16 — 8 vCPU / 16 ГБ / 240 ГБ / 1 IPv4, Финляндия, ~1399 ₽/мес.** IP 31.76.15.130, Ubuntu 24.04.4 LTS, x86_64; SSH по ключу работает. Провалидировано вживую: с финского IP OpenRouter=200 / Groq=401 (не заблокировано → релей не нужен). *1.9.1 (аренда) закрыт; hardening — 1.9.2/1.9.3 в роли base (1.10.2).*
 - **1.9.2** Базовый доступ: пользователь `deploy` без sudo для приложений, ssh только по ключам, `PasswordAuthentication no`. Кодифицируется в Ansible-роли base (1.10.2) — вручную только начальный bootstrap-ключ. ≈ 0.25 дня (в составе 1.10).
 - **1.9.3** Hardening: ufw (allow 22/80/443), fail2ban на sshd, unattended-upgrades (security), sysctl (`net.core.somaxconn`, `vm.overcommit_memory=1`). Тоже в роли base. ≈ в составе 1.10.
 - Итого 1.9 как отдельная работа сверх Ansible ≈ 0.25 дня (провижининг «сырого» сервера до готовности к Ansible).
@@ -41,6 +41,29 @@
 - **1.10.3** Роль `docker`: установка Docker Engine + compose-plugin, автозапуск демона. ≈ 0.25 дня.
 - **1.10.4** Роль `app`: каталоги, выкладка `compose.prod.yml` (1.11.1), unit/автозапуск, entrypoint секретов Infisical. ≈ 0.25–0.5 дня.
 - **1.10.5** Идемпотентность: повторный прогон = 0 changed; зафиксировать как критерий приёмки. Роли переиспользуемы при переезде на k3s (этап 8).
+
+#### Детализация 1.10.1 — скелет Ansible (2026-07-15, перед кодом)
+
+**Объём:** только каркас + CI-тест-контур. Логика ролей (base/docker/app) — в 1.10.2–1.10.4, здесь роли-заглушки.
+
+**Решения (владелец, 2026-07-15):**
+- **A. Тестирование — Molecule (docker-драйвер, Ubuntu 24.04)**, не голый `--check`. Роли прогоняются в CI на эфемерном контейнере без VPS; `molecule test` включает converge + **idempotence** (закрывает критерий 1.10.5 автоматически). На реальном VPS остаётся только сетевой e2e.
+- **B. Секреты — переиспользуем Infisical (1.5).** Ansible НЕ хранит секреты приложения. Он кладёт `/etc/assistant/bootstrap.env` (0600, владелец root) с machine-identity Infisical; контейнеры тянут остальное из vault на старте (инвариант). `ansible-vault` шифрует только bootstrap-значения в `group_vars/prod/vault.yml`; пароль vault — вне репозитория (CI-секрет / локально).
+
+**Структура `infra/ansible/`:**
+- `ansible.cfg` — inventory=./inventory, roles_path=./roles, retry-файлы off, interpreter auto_silent, host_key_checking управляемый.
+- `requirements.yml` — коллекции `community.general`, `ansible.posix`, `community.docker` (версии зафиксированы).
+- `inventory/prod.yml` — группа `prod`, один хост; `ansible_host` через переменную (IP-плейсхолдер до выдачи 1.9.1), `ansible_user=deploy`, `ansible_port=22`.
+- `group_vars/all.yml` — несекретное: `app_dir=/opt/assistant`, `deploy_user=deploy`, `timezone`, версии docker/compose-plugin, релизный тег.
+- `group_vars/prod/vault.yml` — `ansible-vault`, только bootstrap (Infisical machine-identity client_id/secret, адрес Infisical). В репозитории — зашифрованным.
+- `site.yml` — порядок ролей `base → docker → app` (в 1.10.1 роли-заглушки, no-op tasks).
+- `roles/{base,docker,app}/{tasks,handlers,meta}/main.yml` — заглушки (task-`debug`), чтобы `site.yml` собирался; наполнение в 1.10.2–1.10.4.
+- `molecule/default/` — `molecule.yml` (driver docker, image с systemd — `geerlingguy/docker-ubuntu2404-ansible:latest`, privileged/cgroup для systemd), `converge.yml` (прогоняет `site.yml`), `verify.yml` (заглушка ansible-verifier).
+- `README.md` — запуск (`ansible-galaxy install -r requirements.yml`, `molecule test`, `ansible-playbook -i inventory/prod.yml site.yml --ask-vault-pass`), где лежит vault-пароль.
+
+**CI (`.github/workflows`):** отдельный job `ansible` (триггер на изменения `infra/ansible/**`): установка `ansible-core`, `ansible-lint`, `yamllint`, `molecule`, `molecule-plugins[docker]`; шаги — `yamllint .` → `ansible-lint` → `ansible-playbook --syntax-check` → `molecule test` (create→converge→idempotence→verify→destroy). Docker на linux-раннере доступен.
+
+**DoD 1.10.1:** структура на месте; `yamllint`/`ansible-lint` чистые; `--syntax-check` проходит; `molecule test` зелёный (converge + **idempotence 0 changed**) на ubuntu:24.04 в CI; секретов в репозитории нет (gitleaks; vault-файл зашифрован, пароль вне репо). Приёмка на реальном VPS — отложена до выдачи сервера (1.9.1) и наполнения ролей (1.10.2+).
 
 ### 1.11. Прод-compose + Caddy + webhook  ≈ 1–1.5 дня
 - **1.11.1** `infra/compose.prod.yml`: контейнеры `gateway`, `worker`, `scheduler` (сейчас в dev — процессы на хосте!) + инфра (postgres, pgbouncer, redis×2, infisical, searxng, embeddings, prometheus, grafana, blackbox). Отличия от dev: `restart: unless-stopped`, resource limits, healthcheck+`depends_on`, без биндов на localhost, прод-профили. ≈ 0.5 дня. **Архитектурное — состав/топологию утверждает fable.**

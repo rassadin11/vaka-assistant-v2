@@ -1,0 +1,35 @@
+name: Ansible
+
+on:
+  push:
+    paths:
+      - "infra/ansible/**"
+  pull_request:
+    paths:
+      - "infra/ansible/**"
+
+jobs:
+  ansible:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/ansible
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Ansible tooling
+        run: >-
+          python -m pip install --upgrade pip ansible-core ansible-lint yamllint
+          molecule "molecule-plugins[docker]"
+      - name: Install Ansible collections
+        run: ansible-galaxy collection install -r requirements.yml
+      - name: Lint YAML
+        run: yamllint .
+      - name: Lint Ansible
+        run: ansible-lint
+      - name: Check Ansible syntax
+        run: ansible-playbook --syntax-check site.yml
+      - name: Test Molecule scenario
+        run: molecule test

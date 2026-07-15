@@ -26,3 +26,6 @@ htmlcov/
 Thumbs.db
 .DS_Store
 .claude/settings.local.json
+
+# Ansible bootstrap secrets are encrypted locally and must not be committed.
+infra/ansible/group_vars/prod/vault.yml

@@ -1,0 +1,4 @@
+---
+- name: Report docker role stub
+  ansible.builtin.debug:
+    msg: Docker role stub completed.

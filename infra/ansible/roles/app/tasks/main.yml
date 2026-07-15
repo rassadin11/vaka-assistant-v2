@@ -1,0 +1,4 @@
+---
+- name: Report application role stub
+  ansible.builtin.debug:
+    msg: Application role stub completed.

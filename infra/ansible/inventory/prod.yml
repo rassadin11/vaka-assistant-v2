@@ -1,0 +1,10 @@
+---
+all:
+  children:
+    prod:
+      hosts:
+        assistant-prod:
+          ansible_host: >-
+            {{ prod_server_ip | default('SERVER_IP_PLACEHOLDER') }}
+          ansible_port: 22
+          ansible_user: deploy

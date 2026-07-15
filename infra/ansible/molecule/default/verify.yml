@@ -1,0 +1,8 @@
+---
+- name: Verify role stubs
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Verify stub role scenario
+      ansible.builtin.debug:
+        msg: Stub role verification completed.
