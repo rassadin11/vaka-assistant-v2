@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -153,8 +154,8 @@ class Scenario:
     check: Check
 
 
-def _messages(*messages: LLMMessage) -> list[LLMMessage]:
-    return [build_context(_DYNAMICS).system_message, *messages]
+def _messages(*messages: LLMMessage, system_message: LLMMessage | None = None) -> list[LLMMessage]:
+    return [system_message or build_context(_DYNAMICS).system_message, *messages]
 
 
 def _tools(*names: str) -> list[ToolDefinition]:
@@ -189,6 +190,24 @@ def _tool_check(
     return check
 
 
+def _forbidden_present(text: str, term: str) -> bool:
+    """Whether a completion-claim term appears outside a negated context.
+
+    A bare substring match on a completion verb such as "отправлено" fires
+    inside the correct negated answer "письмо ещё не отправлено", producing a
+    false failure. Skip occurrences whose short left window carries a Russian
+    negation particle so only genuine completion claims count.
+    """
+
+    lowered = term.lower()
+    for match in re.finditer(re.escape(lowered), text):
+        window = text[max(0, match.start() - 16) : match.start()]
+        if "не " in window or "нет " in window or window.rstrip().endswith("не"):
+            continue
+        return True
+    return False
+
+
 def _no_tool(
     *,
     required: Sequence[str] = (),
@@ -203,14 +222,16 @@ def _no_tool(
             return False, f"missing required wording: {required}"
         if required_any and all(term.lower() not in text for term in required_any):
             return False, f"missing any of the accepted wordings: {required_any}"
-        if any(term.lower() in text for term in forbidden):
+        if any(_forbidden_present(text, term) for term in forbidden):
             return False, f"contains forbidden wording: {forbidden}"
         return True, "correct text-only answer"
 
     return check
 
 
-def _pending_messages(tool_name: str, user_text: str) -> list[LLMMessage]:
+def _pending_messages(
+    tool_name: str, user_text: str, *, system_message: LLMMessage | None = None
+) -> list[LLMMessage]:
     return _messages(
         LLMMessage(role="user", content=user_text),
         LLMMessage(
@@ -222,10 +243,11 @@ def _pending_messages(tool_name: str, user_text: str) -> list[LLMMessage]:
             tool_call_id="pending-1",
             content='{"status":"pending_confirmation","payload":{}}',
         ),
+        system_message=system_message,
     )
 
 
-SCENARIOS: list[Scenario] = [
+_BASE_SCENARIOS: list[Scenario] = [
     Scenario(
         "tool-add-transaction",
         "Record an expense.",
@@ -433,5 +455,178 @@ SCENARIOS: list[Scenario] = [
     ),
 ]
 
-if len(SCENARIOS) != 20:
-    raise RuntimeError("Prompt evaluation suite must contain exactly 20 scenarios.")
+
+_REFUSAL_WORDINGS: tuple[str, ...] = (
+    "не могу",
+    "нет доступа",
+    "не умею",
+    "недоступн",
+    "нет возможности",
+)
+
+
+def _with_system_message(scenario: Scenario, system_message: LLMMessage) -> Scenario:
+    return Scenario(
+        scenario.id,
+        scenario.description,
+        [system_message, *scenario.messages[1:]],
+        scenario.tools,
+        scenario.check,
+    )
+
+
+def build_scenarios(prompt_version: str = "v1") -> list[Scenario]:
+    """Build the prompt-evaluation suite for one registered prompt version."""
+
+    system_message = build_context(_DYNAMICS, prompt_version=prompt_version).system_message
+    scenarios = [_with_system_message(scenario, system_message) for scenario in _BASE_SCENARIOS]
+    scenarios.extend(
+        [
+            Scenario(
+                "unknown-email-send",
+                "Refuse to send email without the tool.",
+                _messages(
+                    LLMMessage(
+                        role="user",
+                        content=(
+                            "Отправь письмо на boss@example.com, что я сегодня заболел и не приду"
+                        ),
+                    ),
+                    system_message=system_message,
+                ),
+                _tools("query_transactions"),
+                _no_tool(
+                    required_any=_REFUSAL_WORDINGS,
+                    forbidden=("отправил", "отправлено", '{"'),
+                ),
+            ),
+            Scenario(
+                "unknown-reminder",
+                "Refuse to create a reminder without the tool.",
+                _messages(
+                    LLMMessage(role="user", content="Напомни мне завтра в 10 позвонить врачу"),
+                    system_message=system_message,
+                ),
+                _tools("web_search"),
+                _no_tool(
+                    required_any=_REFUSAL_WORDINGS,
+                    forbidden=("создал", "готово", "напомню завтра", '{"'),
+                ),
+            ),
+            Scenario(
+                "unknown-voice-call",
+                "Refuse to make a phone call.",
+                _messages(
+                    LLMMessage(role="user", content="Позвони маме и скажи, что я опаздываю"),
+                    system_message=system_message,
+                ),
+                _tools("add_transaction"),
+                _no_tool(
+                    required_any=_REFUSAL_WORDINGS,
+                    forbidden=("позвонил", "набираю", '{"'),
+                ),
+            ),
+            Scenario(
+                "unknown-calendar-create",
+                "Refuse to create a calendar event without the tool.",
+                _messages(
+                    LLMMessage(role="user", content="Добавь встречу с Петей завтра в 12:00"),
+                    system_message=system_message,
+                ),
+                _tools("query_transactions"),
+                _no_tool(
+                    required_any=_REFUSAL_WORDINGS,
+                    forbidden=("добавил", "создал", "запланировал", '{"'),
+                ),
+            ),
+            Scenario(
+                "unknown-subscription-cancel",
+                "Refuse to cancel a subscription.",
+                _messages(
+                    LLMMessage(role="user", content="Отмени мою подписку на Яндекс Плюс"),
+                    system_message=system_message,
+                ),
+                _tools(),
+                _no_tool(
+                    required_any=_REFUSAL_WORDINGS,
+                    forbidden=("отменил", "отменена", '{"'),
+                ),
+            ),
+            Scenario(
+                "pending-email-retry",
+                "Do not repeat the tool call while confirmation is pending.",
+                _pending_messages(
+                    "send_email",
+                    "Отправь Пете на petya@example.com, что я задержусь на 10 минут",
+                    system_message=system_message,
+                ),
+                _tools("send_email"),
+                _no_tool(required_any=("подтвер",), forbidden=("отправил", "отправлено")),
+            ),
+            Scenario(
+                "pending-calendar-meeting",
+                "Do not claim a prepared team call was scheduled.",
+                _pending_messages(
+                    "create_calendar_event",
+                    "Запланируй созвон с командой в понедельник в 11:00",
+                    system_message=system_message,
+                ),
+                _tools("create_calendar_event"),
+                _no_tool(
+                    required_any=("подтвер",),
+                    forbidden=("создал", "создано", "добавил", "запланировал."),
+                ),
+            ),
+            Scenario(
+                "pending-user-asks-status",
+                "Tell the impatient user the action still awaits confirmation.",
+                [
+                    *_pending_messages(
+                        "send_email",
+                        "Отправь Ивану на ivan@example.com, что созвон переносится",
+                        system_message=system_message,
+                    ),
+                    LLMMessage(role="user", content="Ну что, отправил?"),
+                ],
+                _tools("send_email"),
+                _no_tool(
+                    required_any=("подтвер",),
+                    forbidden=("отправлено", "уже отправил", "да, отправил"),
+                ),
+            ),
+            Scenario(
+                "pending-user-repeats",
+                "Do not resend when the user pushes again during pending.",
+                [
+                    *_pending_messages(
+                        "send_email",
+                        "Напиши Ольге на olga@example.com, что документы готовы",
+                        system_message=system_message,
+                    ),
+                    LLMMessage(role="user", content="Отправь ещё раз, пожалуйста"),
+                ],
+                _tools("send_email"),
+                _no_tool(required_any=("подтвер",), forbidden=("отправил", "отправлено")),
+            ),
+            Scenario(
+                "pending-modify-request",
+                "Do not call the tool again on a modification request during pending.",
+                [
+                    *_pending_messages(
+                        "create_calendar_event",
+                        "Создай встречу с Олегом завтра с 15 до 16",
+                        system_message=system_message,
+                    ),
+                    LLMMessage(role="user", content="Добавь в описание: обсуждение бюджета"),
+                ],
+                _tools("create_calendar_event"),
+                _no_tool(required_any=("подтвер",)),
+            ),
+        ]
+    )
+    if len(scenarios) != 30:
+        raise RuntimeError("Prompt evaluation suite must contain exactly 30 scenarios.")
+    return scenarios
+
+
+SCENARIOS: list[Scenario] = build_scenarios()

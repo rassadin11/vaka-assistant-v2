@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from core.llm import LLMMessage, serialize_tool_calls
-from core.prompt import STATIC_CORE
+from core.prompt import PROMPT_VERSION, get_prompt
 from core.tokens import count_tokens, truncate_to_tokens
 
 BUDGETS: dict[str, int] = {"A": 1500, "C": 100, "D": 400, "E": 800, "F": 3000}
@@ -51,10 +51,12 @@ def build_context(
     summary: SummaryContext | str | None = None,
     tail: Sequence[LLMMessage] = (),
     lean: bool = False,
+    prompt_version: str = PROMPT_VERSION,
 ) -> BuiltContext:
     """Build blocks A--F while enforcing all configured token budgets."""
 
-    _require_within_budget("A", STATIC_CORE)
+    core = get_prompt(prompt_version)
+    _require_within_budget("A", core)
     dynamics_block = _build_dynamics(dynamics)
     _require_within_budget("C", dynamics_block)
     facts_block = "" if lean else _fit_facts(facts)
@@ -62,7 +64,7 @@ def build_context(
     tail_budget = BUDGETS["F"] // 2 if lean else BUDGETS["F"]
     bounded_tail, trimmed, needs_summarization = _fit_tail(tail, tail_budget)
 
-    sections = [STATIC_CORE, _USER_DYNAMICS_HEADER, dynamics_block]
+    sections = [core, _USER_DYNAMICS_HEADER, dynamics_block]
     if facts_block:
         sections.extend([_FACTS_HEADER, facts_block])
     if summary_block:
