@@ -31,8 +31,8 @@
 
 ### 1.9. Сервер + hardening
 - **1.9.1** [владелец] Аренда сервера по Б1: 4–6 vCPU / 16 GB / NVMe 100+ GB, Ubuntu 24.04 LTS. **Выбрано и выдано (2026-07-15): xorek.cloud FI-R9-16 — 8 vCPU / 16 ГБ / 240 ГБ / 1 IPv4, Финляндия, ~1399 ₽/мес.** IP 31.76.15.130, Ubuntu 24.04.4 LTS, x86_64; SSH по ключу работает. Провалидировано вживую: с финского IP OpenRouter=200 / Groq=401 (не заблокировано → релей не нужен). *1.9.1 (аренда) закрыт; hardening — 1.9.2/1.9.3 в роли base (1.10.2).*
-- **1.9.2** Базовый доступ: пользователь `deploy` без sudo для приложений, ssh только по ключам, `PasswordAuthentication no`. Кодифицируется в Ansible-роли base (1.10.2) — вручную только начальный bootstrap-ключ. ≈ 0.25 дня (в составе 1.10).
-- **1.9.3** Hardening: ufw (allow 22/80/443), fail2ban на sshd, unattended-upgrades (security), sysctl (`net.core.somaxconn`, `vm.overcommit_memory=1`). Тоже в роли base. ≈ в составе 1.10.
+- **1.9.2** ✓ (2026-07-16, роль base) Базовый доступ: пользователь `deploy` (rootless-приложения + sudo для Ansible), ssh только по ключам, `PasswordAuthentication no`. Применено на 31.76.15.130.
+- **1.9.3** ✓ (2026-07-16, роль base) Hardening: ufw (allow 22/80/443), fail2ban на sshd, unattended-upgrades (security), sysctl (`net.core.somaxconn=1024`, `vm.overcommit_memory=1`). Применено на 31.76.15.130.
 - Итого 1.9 как отдельная работа сверх Ansible ≈ 0.25 дня (провижининг «сырого» сервера до готовности к Ansible).
 
 ### 1.10. Ansible (провижининг как код)  ≈ 1–1.5 дня (Codex по спеке + приёмка Claude на VPS)
@@ -88,7 +88,7 @@
 
 **Живая приёмка на 31.76.15.130 (после зелёного Molecule/CI, с ОТДЕЛЬНЫМ подтверждением владельца):** прогон `ansible-playbook -i inventory/prod.yml site.yml` под root из WSL → проверить: `ssh deploy@…` заходит по ключу и `sudo` работает; парольный вход отбивается; ufw active (22/80/443); fail2ban sshd jail активен; sysctl применён; повторный прогон = 0 changed. Root по ключу остаётся (prohibit-password) как fallback на время беты — не потерять доступ.
 
-**DoD 1.10.2:** роль наполнена; Molecule converge+idempotence зелёные в CI; ansible-lint(production)/yamllint/syntax зелёные; секретов нет; живой прогон на VPS: deploy заходит по ключу с sudo, sshd/ufw/fail2ban/unattended-upgrades/sysctl применены, повторный прогон 0 changed, доступ не потерян.
+**DoD 1.10.2:** роль наполнена; Molecule converge+idempotence зелёные в CI; ansible-lint(production)/yamllint/syntax зелёные; секретов нет; живой прогон на VPS: deploy заходит по ключу с sudo, sshd/ufw/fail2ban/unattended-upgrades/sysctl применены, повторный прогон 0 changed, доступ не потерян. **Принято 2026-07-16 (коммиты ef43c37 + 45c3692):** живой прогон под root — 13 changed; deploy по ключу + `sudo -n`; root по ключу как fallback; пароль отклонён; ufw active (22/80/443), fail2ban sshd active, sysctl 1024/1, tz Europe/Moscow, эффективный sshd подтверждены на 31.76.15.130; **второй прогон под deploy через sudo — 0 changed**. Тех-долг: `ansible_virtualization_type` → `ansible_facts['virtualization_type']` до ansible-core 2.24.
 
 ### 1.11. Прод-compose + Caddy + webhook  ≈ 1–1.5 дня
 - **1.11.1** `infra/compose.prod.yml`: контейнеры `gateway`, `worker`, `scheduler` (сейчас в dev — процессы на хосте!) + инфра (postgres, pgbouncer, redis×2, infisical, searxng, embeddings, prometheus, grafana, blackbox). Отличия от dev: `restart: unless-stopped`, resource limits, healthcheck+`depends_on`, без биндов на localhost, прод-профили. ≈ 0.5 дня. **Архитектурное — состав/топологию утверждает fable.**
