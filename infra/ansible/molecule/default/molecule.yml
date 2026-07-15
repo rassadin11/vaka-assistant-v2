@@ -6,6 +6,7 @@ driver:
 platforms:
   - name: instance
     image: geerlingguy/docker-ubuntu2404-ansible:latest
+    pre_build_image: true
     privileged: true
     cgroupns_mode: host
     groups:

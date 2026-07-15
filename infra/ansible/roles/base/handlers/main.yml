@@ -3,8 +3,14 @@
   ansible.builtin.service:
     name: ssh
     state: restarted
+  when: >-
+    ansible_virtualization_type not in
+    ['docker', 'container', 'containerd', 'lxc', 'podman']
 
 - name: Restart fail2ban
   ansible.builtin.service:
     name: fail2ban
     state: restarted
+  when: >-
+    ansible_virtualization_type not in
+    ['docker', 'container', 'containerd', 'lxc', 'podman']
