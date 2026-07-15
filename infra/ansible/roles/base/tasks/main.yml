@@ -1,4 +1,224 @@
 ---
-- name: Report base role stub
-  ansible.builtin.debug:
-    msg: Base role stub completed.
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  tags:
+    - base
+    - packages
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - fail2ban
+      - openssh-server
+      - sudo
+      - ufw
+      - unattended-upgrades
+    state: present
+  tags:
+    - base
+    - packages
+
+- name: Create deploy user
+  ansible.builtin.user:
+    name: "{{ deploy_user }}"
+    shell: /bin/bash
+    create_home: true
+    state: present
+  tags:
+    - base
+    - deploy
+
+- name: Install deploy user SSH authorized key
+  ansible.posix.authorized_key:
+    user: "{{ deploy_user }}"
+    key: "{{ deploy_ssh_public_key }}"
+    state: present
+  tags:
+    - base
+    - deploy
+
+- name: Configure passwordless sudo for deploy user
+  ansible.builtin.copy:
+    content: "{{ deploy_user }} ALL=(ALL) NOPASSWD:ALL\n"
+    dest: /etc/sudoers.d/deploy
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "visudo -cf %s"
+  tags:
+    - base
+    - deploy
+
+- name: Configure sshd hardening drop-in
+  ansible.builtin.copy:
+    content: |
+      PasswordAuthentication no
+      PermitRootLogin prohibit-password
+      PubkeyAuthentication yes
+      KbdInteractiveAuthentication no
+      X11Forwarding no
+      MaxAuthTries 4
+    dest: /etc/ssh/sshd_config.d/10-hardening.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart SSH
+  tags:
+    - base
+    - ssh
+    - hardening
+
+- name: Set UFW default incoming policy
+  community.general.ufw:
+    default: deny
+    direction: incoming
+  when: >-
+    ansible_virtualization_type not in
+    ['docker', 'container', 'containerd', 'lxc', 'podman']
+  tags:
+    - base
+    - firewall
+    - hardening
+
+- name: Set UFW default outgoing policy
+  community.general.ufw:
+    default: allow
+    direction: outgoing
+  when: >-
+    ansible_virtualization_type not in
+    ['docker', 'container', 'containerd', 'lxc', 'podman']
+  tags:
+    - base
+    - firewall
+    - hardening
+
+- name: Allow required incoming ports through UFW
+  community.general.ufw:
+    rule: allow
+    direction: in
+    port: "{{ item }}"
+    proto: tcp
+  loop:
+    - "22"
+    - "80"
+    - "443"
+  when: >-
+    ansible_virtualization_type not in
+    ['docker', 'container', 'containerd', 'lxc', 'podman']
+  tags:
+    - base
+    - firewall
+    - hardening
+
+- name: Enable UFW
+  community.general.ufw:
+    state: enabled
+  when: >-
+    ansible_virtualization_type not in
+    ['docker', 'container', 'containerd', 'lxc', 'podman']
+  tags:
+    - base
+    - firewall
+    - hardening
+
+- name: Configure fail2ban sshd jail
+  ansible.builtin.copy:
+    content: |
+      [sshd]
+      enabled = true
+      bantime = 1h
+      findtime = 10m
+      maxretry = 5
+    dest: /etc/fail2ban/jail.d/sshd.local
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart fail2ban
+  when: >-
+    ansible_virtualization_type not in
+    ['docker', 'container', 'containerd', 'lxc', 'podman']
+  tags:
+    - base
+    - fail2ban
+    - hardening
+
+- name: Ensure fail2ban service is enabled and started
+  ansible.builtin.service:
+    name: fail2ban
+    enabled: true
+    state: started
+  when: >-
+    ansible_virtualization_type not in
+    ['docker', 'container', 'containerd', 'lxc', 'podman']
+  tags:
+    - base
+    - fail2ban
+    - hardening
+
+- name: Configure automatic package list updates
+  ansible.builtin.copy:
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - base
+    - unattended-upgrades
+
+- name: Restrict unattended upgrades to security updates
+  ansible.builtin.copy:
+    content: |
+      Unattended-Upgrade::Allowed-Origins {
+          "${distro_id}:${distro_codename}-security";
+      };
+      Unattended-Upgrade::Automatic-Reboot "false";
+    dest: /etc/apt/apt.conf.d/50unattended-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - base
+    - unattended-upgrades
+
+- name: Configure TCP connection backlog
+  ansible.posix.sysctl:
+    name: net.core.somaxconn
+    value: "1024"
+    state: present
+    sysctl_file: /etc/sysctl.d/60-assistant.conf
+    reload: true
+  when: >-
+    ansible_virtualization_type not in
+    ['docker', 'container', 'containerd', 'lxc', 'podman']
+  tags:
+    - base
+    - sysctl
+    - hardening
+
+- name: Configure memory overcommit
+  ansible.posix.sysctl:
+    name: vm.overcommit_memory
+    value: "1"
+    state: present
+    sysctl_file: /etc/sysctl.d/60-assistant.conf
+    reload: true
+  when: >-
+    ansible_virtualization_type not in
+    ['docker', 'container', 'containerd', 'lxc', 'podman']
+  tags:
+    - base
+    - sysctl
+    - hardening
+
+- name: Set system timezone
+  community.general.timezone:
+    name: "{{ timezone }}"
+  tags:
+    - base
+    - timezone

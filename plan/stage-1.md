@@ -63,7 +63,32 @@
 
 **CI (`.github/workflows`):** отдельный job `ansible` (триггер на изменения `infra/ansible/**`): установка `ansible-core`, `ansible-lint`, `yamllint`, `molecule`, `molecule-plugins[docker]`; шаги — `yamllint .` → `ansible-lint` → `ansible-playbook --syntax-check` → `molecule test` (create→converge→idempotence→verify→destroy). Docker на linux-раннере доступен.
 
-**DoD 1.10.1:** структура на месте; `yamllint`/`ansible-lint` чистые; `--syntax-check` проходит; `molecule test` зелёный (converge + **idempotence 0 changed**) на ubuntu:24.04 в CI; секретов в репозитории нет (gitleaks; vault-файл зашифрован, пароль вне репо). Приёмка на реальном VPS — отложена до выдачи сервера (1.9.1) и наполнения ролей (1.10.2+).
+**DoD 1.10.1:** структура на месте; `yamllint`/`ansible-lint` чистые; `--syntax-check` проходит; `molecule test` зелёный (converge + **idempotence 0 changed**) на ubuntu:24.04 в CI; секретов в репозитории нет (gitleaks; vault-файл зашифрован, пароль вне репо). Приёмка на реальном VPS — отложена до выдачи сервера (1.9.1) и наполнения ролей (1.10.2+). **Принято 2026-07-15 (коммит b5ffb03): оба CI-workflow зелёные, molecule прошёл.**
+
+#### Детализация 1.10.2 — роль `base` (hardening + deploy) (2026-07-15, перед кодом)
+
+**Объём:** наполнить `roles/base` реальными задачами (в 1.10.1 — заглушка). Роли `docker`/`app` остаются заглушками (их черёд — 1.10.3/1.10.4).
+
+**Решения (разрешают неоднозначность 1.9.2):**
+- **Пользователь `deploy` с passwordless sudo.** «Без sudo для приложений» трактуем так: приложение работает в контейнерах rootless (deploy в группе `docker`, добавится в 1.10.3), а sudo нужен только Ansible для провижининга (`become`). Отдельного admin-пользователя не заводим — для одиночного сервера беты избыточно. Публичный ключ deploy = наш существующий `id_ed25519.pub` (кладём в `authorized_keys` deploy; это публичный ключ, не секрет — в group_vars/all.yml).
+- **Порядок против самолока.** Bootstrap-прогон под `root` (сейчас так и заходим). Роль: (1) создаёт `deploy` + ключ + sudo NOPASSWD; (2) только ПОСЛЕ этого правит sshd. `PermitRootLogin` → `prohibit-password` (root по ключу остаётся аварийным fallback, паролем — нельзя), `PasswordAuthentication no`. Даже при проблеме с deploy доступ по ключу не теряется. После подтверждения, что deploy заходит с sudo, инвентарь переключаем на `ansible_user=deploy` (он уже прописан в prod.yml).
+- **Задачи, несовместимые с Molecule-контейнером** (sysctl в read-only `/proc/sys`, ufw/fail2ban без NET_ADMIN) гейтить условием (`ansible_virtualization_type != 'docker'` / molecule-переменная), чтобы Molecule оставался зелёным на идемпотентности, а на реальном VPS они выполнялись. Полная проверка фаервола/хардненинга — вживую на 31.76.15.130.
+
+**Задачи роли `base` (tasks/main.yml, с тегами, handlers для restart):**
+1. `apt` update (cache_valid_time) + пакеты: `ufw`, `fail2ban`, `unattended-upgrades`, базовые утилиты.
+2. **deploy:** `ansible.builtin.user` (bash, create_home) → `authorized_key` (публичный ключ из var) → sudoers `/etc/sudoers.d/deploy` (`deploy ALL=(ALL) NOPASSWD:ALL`, `validate: visudo -cf %s`).
+3. **sshd hardening** через drop-in `/etc/ssh/sshd_config.d/10-hardening.conf` (handler restart ssh): `PasswordAuthentication no`, `PermitRootLogin prohibit-password`, `PubkeyAuthentication yes`, `KbdInteractiveAuthentication no`, `X11Forwarding no`, `MaxAuthTries 4`. Основной конфиг не трогаем.
+4. **ufw** (гейт): default deny incoming / allow outgoing; allow 22/80/443; enable.
+5. **fail2ban** (гейт): jail для sshd (разумные bantime/findtime/maxretry), enable+start.
+6. **unattended-upgrades:** только security-обновления (`20auto-upgrades` + `50unattended-upgrades`), без авто-reboot.
+7. **sysctl** (гейт) `/etc/sysctl.d/60-assistant.conf`: `net.core.somaxconn=1024`, `vm.overcommit_memory=1`.
+8. **timezone** из group_vars.
+
+**Molecule:** converge применяет `site.yml` (base с реальными задачами, docker/app-заглушки); проверяем converge + **idempotence 0 changed** (гейты держат идемпотентность в контейнере). `verify.yml` расширить контейнерно-совместимыми проверками: пользователь `deploy` существует, drop-in sshd на месте, sudoers валиден.
+
+**Живая приёмка на 31.76.15.130 (после зелёного Molecule/CI, с ОТДЕЛЬНЫМ подтверждением владельца):** прогон `ansible-playbook -i inventory/prod.yml site.yml` под root из WSL → проверить: `ssh deploy@…` заходит по ключу и `sudo` работает; парольный вход отбивается; ufw active (22/80/443); fail2ban sshd jail активен; sysctl применён; повторный прогон = 0 changed. Root по ключу остаётся (prohibit-password) как fallback на время беты — не потерять доступ.
+
+**DoD 1.10.2:** роль наполнена; Molecule converge+idempotence зелёные в CI; ansible-lint(production)/yamllint/syntax зелёные; секретов нет; живой прогон на VPS: deploy заходит по ключу с sudo, sshd/ufw/fail2ban/unattended-upgrades/sysctl применены, повторный прогон 0 changed, доступ не потерян.
 
 ### 1.11. Прод-compose + Caddy + webhook  ≈ 1–1.5 дня
 - **1.11.1** `infra/compose.prod.yml`: контейнеры `gateway`, `worker`, `scheduler` (сейчас в dev — процессы на хосте!) + инфра (postgres, pgbouncer, redis×2, infisical, searxng, embeddings, prometheus, grafana, blackbox). Отличия от dev: `restart: unless-stopped`, resource limits, healthcheck+`depends_on`, без биндов на localhost, прод-профили. ≈ 0.5 дня. **Архитектурное — состав/топологию утверждает fable.**

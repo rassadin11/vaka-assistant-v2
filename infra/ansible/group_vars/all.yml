@@ -1,6 +1,9 @@
 ---
 app_dir: /opt/assistant
 deploy_user: deploy
+deploy_ssh_public_key: "ssh-ed25519 \
+  AAAAC3NzaC1lZDI1NTE5AAAAID4dXuMOXBdO3gp0EOBpvc7y2vn7mL/cunQ9z4ifO/5p \
+  artem.rassadin.05@mail.ru"
 timezone: Europe/Moscow
 docker_version: "5:27.5.1-1~ubuntu.24.04~noble"
 docker_compose_plugin_version: "2.32.4-1~ubuntu.24.04~noble"

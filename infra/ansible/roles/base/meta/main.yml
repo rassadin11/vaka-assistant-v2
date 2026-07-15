@@ -1,7 +1,7 @@
 ---
 galaxy_info:
   author: Project maintainers
-  description: Base host configuration role placeholder.
+  description: Base host configuration and hardening role.
   license: MIT
   min_ansible_version: "2.16"
   platforms:

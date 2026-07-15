@@ -1,8 +1,46 @@
 ---
-- name: Verify role stubs
+- name: Verify base role
   hosts: all
   gather_facts: false
   tasks:
-    - name: Verify stub role scenario
-      ansible.builtin.debug:
-        msg: Stub role verification completed.
+    - name: Get deploy user account
+      ansible.builtin.getent:
+        database: passwd
+        key: deploy
+
+    - name: Verify deploy user exists
+      ansible.builtin.assert:
+        that:
+          - "'deploy' in ansible_facts.getent_passwd"
+
+    - name: Check sshd hardening drop-in
+      ansible.builtin.stat:
+        path: /etc/ssh/sshd_config.d/10-hardening.conf
+      register: sshd_hardening_dropin
+
+    - name: Verify sshd hardening drop-in exists
+      ansible.builtin.assert:
+        that:
+          - sshd_hardening_dropin.stat.exists
+
+    - name: Read sshd hardening drop-in
+      ansible.builtin.slurp:
+        src: /etc/ssh/sshd_config.d/10-hardening.conf
+      register: sshd_hardening_contents
+
+    - name: Verify sshd password authentication is disabled
+      ansible.builtin.assert:
+        that:
+          - >-
+            'PasswordAuthentication no' in
+            (sshd_hardening_contents.content | b64decode)
+
+    - name: Check deploy sudoers drop-in
+      ansible.builtin.stat:
+        path: /etc/sudoers.d/deploy
+      register: deploy_sudoers_dropin
+
+    - name: Verify deploy sudoers drop-in exists
+      ansible.builtin.assert:
+        that:
+          - deploy_sudoers_dropin.stat.exists

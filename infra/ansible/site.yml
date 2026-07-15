@@ -2,7 +2,7 @@
 - name: Provision production hosts
   hosts: prod
   become: true
-  gather_facts: false
+  gather_facts: true
   roles:
     - base
     - docker
