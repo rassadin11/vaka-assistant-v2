@@ -1,0 +1,22 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+  - name: PostgreSQL
+    uid: postgres
+    type: postgres
+    access: proxy
+    url: pgbouncer:6432
+    user: metrics_ro
+    secureJsonData:
+      password: $__env{GRAFANA_METRICS_RO_PASSWORD}
+    jsonData:
+      database: assistant
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false

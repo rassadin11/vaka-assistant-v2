@@ -150,6 +150,39 @@
 - **1.11.3** [владелец] DNS A-запись на сервер (по Б2). *Ожидание владельца.*
 - **1.11.4** Перевод gateway на **webhook** на проде: `python -m gateway set-webhook` с `PUBLIC_URL`, проверка secret_token и фильтра приватных чатов; отказ от polling в прод-режиме. ≈ 0.25 дня.
 
+#### Детализация 1.11.1 — `compose.prod.yml`: топология (2026-07-16, fable, перед кодом)
+
+**Уточнения плана по факту кода:**
+- Отдельного контейнера `scheduler` НЕ будет: `SchedulerProcessor` и `OutboxProcessor` запускаются внутри процесса воркера (`worker/__main__.py`), конкурентность безопасна (`FOR UPDATE … SKIP LOCKED`, идемпотентные ключи). Прод-контейнеры приложения: `gateway` + `worker` (масштаб — репликами воркера).
+- Прод не собирает образы на сервере: три prebuilt-образа из GHCR — app (`ghcr.io/rassadin11/vaka-assistant-v2`, Dockerfile корня, команда на сервис), кастомный postgres (pg16+partman+pgbackrest, `…-postgres`), embeddings (`…-embeddings`, Dockerfile появится в 1.12.1). **Правка объёма 1.12.1: CI собирает и пушит три образа, не один.** До 1.12 compose обязан быть валидным (`config -q`), но не стартует — unit не enabled, это ок.
+
+**Файлы в репо:** `infra/compose.prod.yml` + `infra/prod/` только для отличающихся от dev конфигов (prometheus prod, grafana datasources prod, postgresql.prod.conf); совпадающие конфиги (redis, pgbouncer, searxng, blackbox, grafana dashboards/alerting) переиспользуются из dev-каталогов без дублирования.
+
+**Секреты и env (механизм):**
+- `/etc/assistant/bootstrap.env` — machine-identity Infisical для gateway/worker (появится в 1.12.2, как решено в 1.10.4).
+- `/etc/assistant/infra.env` — инфраструктурные секреты, которые не могут жить в Infisical (курица-яйцо): POSTGRES_PASSWORD, PGBACKREST_*_CIPHER_PASS, ENCRYPTION_KEY/AUTH_SECRET/DB_CONNECTION_URI Infisical, SEARXNG_SECRET, GF_SECURITY_ADMIN_PASSWORD, TELEGRAM_ALERT_*. Значения засеваются в 1.12.2 (ключи Б4); сейчас роль app кладёт **шаблон с пустыми значениями** (root:deploy 0640, `force: no` — боевой файл не перезатирать).
+- Пути env_file в compose — через `${ENV_FILE_DIR:-/etc/assistant}/…`: на сервере дефолт, локально/в CI валидация со stub-файлами в scratch-каталоге.
+- Несекретная топология (адреса сервисов) — `environment` прямо в compose: redis-queue/redis-cache:6379, `SEARXNG_URL=http://searxng:8080`, embeddings:8000, `INFISICAL_URL=http://infisical:8080`, `LOG_FORMAT=json`. Имена переменных взять из фактических конфигов кода (gateway/config.py, worker/__main__.py, core/db.py, core/secrets.py) — не выдумывать. **DSN БД (`DATABASE_URL`/`SERVICE_DATABASE_URL`) содержат пароли → это секреты, в compose их НЕТ** — доставляются env-файлами /etc/assistant в 1.12.2. Туда же (1.12.2) — прод-пароли ролей Postgres + userlist pgbouncer + пароль metrics_ro для Grafana (в prod-datasource — `$__env{GRAFANA_METRICS_RO_PASSWORD}` из infra.env).
+
+**Критичное правило портов: published-порты Docker обходят ufw.** Наружу не публикуется НИЧЕГО (80/443 добавит caddy в 1.11.2). Админ-доступ — только биндами на 127.0.0.1 (SSH-туннель): grafana 3000, prometheus 9090, infisical 8880. Никаких `5432:5432`/`6379:6379` как в dev.
+
+**Состав сервисов** (все: `restart: unless-stopped`, одна default-сеть, логи — ротация из daemon.json):
+- `gateway`: app-образ `${APP_IMAGE:-ghcr.io/rassadin11/vaka-assistant-v2:latest}`, `command: python -m gateway serve`, expose 8000 (без publish), env_file bootstrap.env, healthcheck GET /healthz (python -c fetch, curl в образе нет), depends_on healthy: pgbouncer, redis-queue, redis-cache.
+- `worker`: тот же образ, `command: python -m worker`, `deploy.replicas: 2`, `WORKER_METRICS_PORT=9100` (expose), env_file bootstrap.env, depends_on healthy: pgbouncer, redis-queue, redis-cache (searxng/embeddings не гейтят — мягкая деградация по плану).
+- `postgres`: образ `…-postgres` из GHCR, без publish; volumes как dev (postgres_data, pgbackrest_repo/spool, init-roles.sql, pgbackrest.conf) + `postgresql.prod.conf` (копия dev-конфига с памятью под 16 ГиБ: shared_buffers 2GB, effective_cache_size 6GB; archive/pgbackrest без изменений); POSTGRES_PASSWORD и cipher-pass — из infra.env.
+- `pgbouncer`, `redis-queue`, `redis-cache`, `searxng`, `blackbox`: как dev (те же конфиги/healthchecks), без publish; SEARXNG_SECRET из infra.env.
+- `embeddings`: образ `…-embeddings`, дефолтный профиль (в проде нужен), volume hf_cache для HF_HOME, healthcheck /healthz.
+- `prometheus`: конфиг `infra/prod/prometheus/prometheus.yml` — gateway:8000; воркер-реплики через `dns_sd_configs` (name `worker`, type A, port 9100), не static; blackbox-джоб как dev. Bind 127.0.0.1:9090.
+- `grafana`: bind 127.0.0.1:3000; **анонимный доступ выключен** (в отличие от dev), admin-пароль из infra.env; datasources prod (`pgbouncer:6432` вместо host.docker.internal); dashboards/alerting provisioning — dev-файлы как есть; TELEGRAM_ALERT_* из infra.env (боевой канал — 1B-x3).
+- `infisical` + `infisical-db` + `infisical-redis`: как dev, все секреты из infra.env, infisical bind 127.0.0.1:8880.
+- НЕ включать: postgres-restore (restore-контур на проде — 1.13.4).
+
+**mem_limit** (сервер 15 GiB, лимиты — потолки, не резервы): postgres 3g (shared_buffers 2GB — при 2.5g риск OOM-kill), embeddings 3g, worker 1g×2, gateway 768m, infisical 1g, infisical-db 512m, infisical-redis 256m, grafana 512m, prometheus 512m, searxng 512m, redis-queue 512m, redis-cache 384m, pgbouncer 128m, blackbox 128m (сумма ≈ 12.7g + запас хосту).
+
+**Выкладка (расширение роли app):** copy `compose.prod.yml` → `/opt/assistant/compose.prod.yml` (deploy:deploy 0644); дерево конфигов → `/opt/assistant/config/…` (redis, pgbouncer, searxng, postgres, blackbox, prometheus prod, grafana provisioning: dev dashboards/alerting + prod datasources); volumes в compose ссылаются на `./config/…` (unit имеет WorkingDirectory=/opt/assistant). Источники — файлы репо через путь от playbook_dir, в роли конфиги не дублировать. Шаблон infra.env — см. выше. Molecule verify: файлы выложены, unit не enabled.
+
+**DoD 1.11.1:** compose.prod.yml в репо, `docker compose -f infra/compose.prod.yml config -q` зелёный локально (stub env-файлы) — проверку добавить в CI рядом с существующей валидацией compose; роль app выкладывает compose+конфиги+шаблон infra.env; molecule converge+idempotence+verify и ansible-lint(production)/yamllint/syntax зелёные; на VPS: файлы на месте, `docker compose … config -q` проходит, unit по-прежнему disabled/inactive, повторный прогон 0 changed; published-портов наружу нет (только 127.0.0.1); секретов в репо нет (gitleaks).
+
 ### 1.12. Доставка на сервер (CI-деплой)  ≈ 1–1.5 дня
 - **1.12.1** CI job: build + push образа в GHCR по тегу (Dockerfile уже есть; нужен workflow-шаг и права GHCR). ≈ 0.25 дня.
 - **1.12.2** Прод-Infisical: поднять инстанс на сервере, засеять прод-секреты (перевыпущенные по Б4), проверить machine identities gateway/worker/scheduler (механизм из 1.5). ≈ 0.25–0.5 дня.

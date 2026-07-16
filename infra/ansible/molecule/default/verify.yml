@@ -111,6 +111,27 @@
           - application_directory.stat.isdir
           - application_directory.stat.pw_name == 'deploy'
 
+    - name: Check application deployment files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /opt/assistant/compose.prod.yml
+        - /opt/assistant/config
+        - /opt/assistant/config/redis
+        - /opt/assistant/config/pgbouncer
+        - /opt/assistant/config/searxng
+        - /opt/assistant/config/postgres
+        - /opt/assistant/config/blackbox
+        - /opt/assistant/config/prometheus
+        - /opt/assistant/config/grafana
+      register: application_deployment_files
+
+    - name: Verify application deployment files exist
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+      loop: "{{ application_deployment_files.results }}"
+
     - name: Check assistant configuration directory
       ansible.builtin.stat:
         path: /etc/assistant
@@ -122,6 +143,17 @@
           - assistant_configuration_directory.stat.exists
           - assistant_configuration_directory.stat.isdir
           - assistant_configuration_directory.stat.mode == '0750'
+
+    - name: Check infrastructure environment template
+      ansible.builtin.stat:
+        path: /etc/assistant/infra.env
+      register: infrastructure_environment_template
+
+    - name: Verify infrastructure environment template
+      ansible.builtin.assert:
+        that:
+          - infrastructure_environment_template.stat.exists
+          - infrastructure_environment_template.stat.mode == '0640'
 
     - name: Check assistant systemd unit
       ansible.builtin.stat:

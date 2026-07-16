@@ -35,6 +35,14 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --dev
+      - name: Validate development Compose configuration
+        run: docker compose -f infra/docker-compose.dev.yml config -q
+      - name: Validate production Compose configuration
+        run: |
+          mkdir -p /tmp/assistant-compose-env
+          touch /tmp/assistant-compose-env/bootstrap.env
+          touch /tmp/assistant-compose-env/infra.env
+          ENV_FILE_DIR=/tmp/assistant-compose-env docker compose -f infra/compose.prod.yml config -q
       - run: docker compose -f infra/docker-compose.dev.yml up -d --wait
       - run: uv run alembic upgrade head
       - run: uv run pytest -v -m integration

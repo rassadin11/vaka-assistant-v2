@@ -1,0 +1,310 @@
+name: personal-assistant-prod
+
+services:
+  gateway:
+    image: ${APP_IMAGE:-ghcr.io/rassadin11/vaka-assistant-v2:latest}
+    command: python -m gateway serve
+    restart: unless-stopped
+    mem_limit: 768m
+    env_file:
+      - ${ENV_FILE_DIR:-/etc/assistant}/bootstrap.env
+    environment:
+      REDIS_QUEUE_URL: redis://redis-queue:6379/0
+      REDIS_CACHE_URL: redis://redis-cache:6379/0
+      LOG_FORMAT: json
+    expose:
+      - "8000"
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/healthz')"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  worker:
+    image: ${APP_IMAGE:-ghcr.io/rassadin11/vaka-assistant-v2:latest}
+    command: python -m worker
+    restart: unless-stopped
+    mem_limit: 1g
+    deploy:
+      replicas: 2
+    env_file:
+      - ${ENV_FILE_DIR:-/etc/assistant}/bootstrap.env
+    environment:
+      # DATABASE_URL / SERVICE_DATABASE_URL contain passwords and are delivered
+      # via /etc/assistant env files seeded in 1.12.2, never hardcoded here.
+      REDIS_QUEUE_URL: redis://redis-queue:6379/0
+      REDIS_CACHE_URL: redis://redis-cache:6379/0
+      SEARXNG_URL: http://searxng:8080
+      EMBEDDINGS_URL: http://embeddings:8000
+      INFISICAL_URL: http://infisical:8080
+      WORKER_METRICS_PORT: "9100"
+      LOG_FORMAT: json
+    expose:
+      - "9100"
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from urllib.request import urlopen; urlopen('http://127.0.0.1:9100/metrics')"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  postgres:
+    image: ghcr.io/rassadin11/vaka-assistant-v2-postgres:${POSTGRES_IMAGE_TAG:-latest}
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.prod.conf"]
+    restart: unless-stopped
+    mem_limit: 3g
+    env_file:
+      - ${ENV_FILE_DIR:-/etc/assistant}/infra.env
+    environment:
+      POSTGRES_USER: assistant
+      POSTGRES_DB: assistant
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - pgbackrest_repo:/var/lib/pgbackrest
+      - pgbackrest_spool:/var/spool/pgbackrest
+      - ./config/postgres/init-roles.sql:/docker-entrypoint-initdb.d/10-init-roles.sql:ro
+      - ./config/postgres/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
+      - ./config/postgres/postgresql.prod.conf:/etc/postgresql/postgresql.prod.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assistant -d assistant"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.2-p0
+    restart: unless-stopped
+    mem_limit: 128m
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./config/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./config/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U assistant -d assistant"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  redis-queue:
+    image: redis:7.4.5-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    restart: unless-stopped
+    mem_limit: 512m
+    volumes:
+      - ./config/redis/redis-queue.conf:/usr/local/etc/redis/redis.conf:ro
+      - redis_queue_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  redis-cache:
+    image: redis:7.4.5-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    restart: unless-stopped
+    mem_limit: 384m
+    volumes:
+      - ./config/redis/redis-cache.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    mem_limit: 512m
+    env_file:
+      - ${ENV_FILE_DIR:-/etc/assistant}/infra.env
+    environment:
+      FORCE_OWNERSHIP: "false"
+    volumes:
+      - ./config/searxng/:/etc/searxng/:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://127.0.0.1:8080/healthz')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  embeddings:
+    image: ghcr.io/rassadin11/vaka-assistant-v2-embeddings:${EMBEDDINGS_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    mem_limit: 3g
+    environment:
+      HF_HOME: /cache
+    expose:
+      - "8000"
+    volumes:
+      - hf_cache:/cache
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/healthz')"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    mem_limit: 512m
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    mem_limit: 512m
+    env_file:
+      - ${ENV_FILE_DIR:-/etc/assistant}/infra.env
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  blackbox:
+    image: prom/blackbox-exporter:latest
+    command: ["--config.file=/config/blackbox.yml"]
+    restart: unless-stopped
+    mem_limit: 128m
+    volumes:
+      - ./config/blackbox/blackbox.yml:/config/blackbox.yml:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9115/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  infisical-db:
+    image: postgres:16.10-alpine
+    restart: unless-stopped
+    mem_limit: 512m
+    env_file:
+      - ${ENV_FILE_DIR:-/etc/assistant}/infra.env
+    environment:
+      POSTGRES_USER: infisical
+      POSTGRES_DB: infisical
+    volumes:
+      - infisical_postgres_data:/var/lib/postgresql/data
+      - infisical_backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U infisical -d infisical"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  infisical-redis:
+    image: redis:7.4.5-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    restart: unless-stopped
+    mem_limit: 256m
+    volumes:
+      - infisical_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  infisical:
+    image: infisical/infisical:v0.161.12
+    restart: unless-stopped
+    mem_limit: 1g
+    env_file:
+      - ${ENV_FILE_DIR:-/etc/assistant}/infra.env
+    environment:
+      NODE_ENV: production
+      POSTGRES_USER: infisical
+      POSTGRES_DB: infisical
+      REDIS_URL: redis://infisical-redis:6379
+      SITE_URL: http://localhost:8880
+      TELEMETRY_ENABLED: "false"
+      OTEL_TELEMETRY_COLLECTION_ENABLED: "false"
+    ports:
+      - "127.0.0.1:8880:8080"
+    depends_on:
+      infisical-db:
+        condition: service_healthy
+      infisical-redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "node -e \"fetch('http://127.0.0.1:8080/api/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+volumes:
+  postgres_data:
+  pgbackrest_repo:
+  pgbackrest_spool:
+  redis_queue_data:
+  hf_cache:
+  prometheus_data:
+  grafana_data:
+  infisical_postgres_data:
+  infisical_backups:
+  infisical_redis_data:

@@ -21,6 +21,89 @@
     - app
     - directories
 
+- name: Install production Compose file
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../compose.prod.yml"
+    dest: "{{ app_dir }}/compose.prod.yml"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0644"
+  tags:
+    - app
+    - compose
+
+- name: Create production configuration directory
+  ansible.builtin.file:
+    path: "{{ app_dir }}/config"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0755"
+  tags:
+    - app
+    - directories
+
+- name: Install shared application configuration directories
+  vars:
+    production_grafana_dir: "{{ playbook_dir }}/../../infra/prod/grafana"
+  ansible.builtin.copy:
+    src: "{{ item.src }}/"
+    dest: "{{ app_dir }}/config/{{ item.dest }}/"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0644"
+    directory_mode: "0755"
+  loop:
+    - src: "{{ playbook_dir }}/../../infra/redis"
+      dest: redis
+    - src: "{{ playbook_dir }}/../../infra/pgbouncer"
+      dest: pgbouncer
+    - src: "{{ playbook_dir }}/../../infra/searxng"
+      dest: searxng
+    - src: "{{ playbook_dir }}/../../infra/blackbox"
+      dest: blackbox
+    - src: "{{ playbook_dir }}/../../infra/prod/prometheus"
+      dest: prometheus
+    - src: "{{ playbook_dir }}/../../infra/grafana/provisioning/alerting"
+      dest: grafana/provisioning/alerting
+    - src: "{{ playbook_dir }}/../../infra/grafana/provisioning/dashboards"
+      dest: grafana/provisioning/dashboards
+    - src: "{{ production_grafana_dir }}/provisioning/datasources"
+      dest: grafana/provisioning/datasources
+  tags:
+    - app
+    - configuration
+
+- name: Install production PostgreSQL configuration files
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ app_dir }}/config/postgres/{{ item.dest }}"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0644"
+  loop:
+    - src: "{{ playbook_dir }}/../../infra/postgres/init-roles.sql"
+      dest: init-roles.sql
+    - src: "{{ playbook_dir }}/../../infra/postgres/pgbackrest.conf"
+      dest: pgbackrest.conf
+    - src: "{{ playbook_dir }}/../../infra/prod/postgres/postgresql.prod.conf"
+      dest: postgresql.prod.conf
+  tags:
+    - app
+    - configuration
+
+- name: Install infrastructure environment template
+  ansible.builtin.template:
+    src: infra.env.j2
+    dest: /etc/assistant/infra.env
+    owner: root
+    group: "{{ deploy_user }}"
+    mode: "0640"
+    force: false
+  tags:
+    - app
+    - configuration
+
 - name: Install assistant systemd unit
   ansible.builtin.copy:
     content: |
