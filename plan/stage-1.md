@@ -219,6 +219,8 @@
 
 **DoD 1.12.1:** workflow зелёный; три пакета видны в GHCR как public; `docker pull` всех трёх образов с VPS проходит без логина; app-образ запускает `python -m gateway --help`-эквивалент (smoke в workflow: `docker run --rm <image> python -c "import gateway, worker, core, tools"`); compose.prod: start_period embeddings обновлён; секретов в диффе нет.
 
+**Принято 2026-07-16 (коммит 64da04f):** Codex-реализация (workflow + Dockerfile.embeddings + start_period), приёмка fable. Нюансы приёмки: локальная валидационная сборка embeddings-образа у Codex упёрлась в переполненный диск C: машины владельца — остановлена, реальная проверка перенесена в Actions (штатная среда сборки); для первой сборки postgres-образа добавлен комментарий-триггер в infra/postgres/Dockerfile (paths-гейт). Живая приёмка: workflow Images зелёный (build+push+smoke-импорт), все три образа скачаны на VPS `docker pull` анонимно (пакеты public). Инцидент машины владельца: C: был заполнен в ноль — почищены uv-кэш и docker build-кэш; рекомендация владельцу — перенести данные Docker Desktop на D:.
+
 ### 1.13. Бэкапы на проде  ≈ 0.5–1 дня
 - **1.13.1** [владелец] Выбор S3-провайдера по Б3 (у другого провайдера, чем сервер). *Ожидание владельца.*
 - **1.13.2** pgBackRest → S3: ежедневный full + WAL, шифрование репозитория (переиспользовать наработки 1.8). ≈ 0.5 дня.
