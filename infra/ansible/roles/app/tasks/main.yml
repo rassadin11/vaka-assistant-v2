@@ -1,4 +1,50 @@
 ---
-- name: Report application role stub
-  ansible.builtin.debug:
-    msg: Application role stub completed.
+- name: Create application directory
+  ansible.builtin.file:
+    path: "{{ app_dir }}"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0755"
+  tags:
+    - app
+    - directories
+
+- name: Create assistant configuration directory
+  ansible.builtin.file:
+    path: /etc/assistant
+    state: directory
+    owner: root
+    group: "{{ deploy_user }}"
+    mode: "0750"
+  tags:
+    - app
+    - directories
+
+- name: Install assistant systemd unit
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=Assistant application (docker compose)
+      Requires=docker.service
+      After=docker.service network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      WorkingDirectory={{ app_dir }}
+      User={{ deploy_user }}
+      ExecStart=/usr/bin/docker compose -f {{ app_dir }}/compose.prod.yml up -d
+      ExecStop=/usr/bin/docker compose -f {{ app_dir }}/compose.prod.yml down
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/assistant.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+  tags:
+    - app
+    - systemd

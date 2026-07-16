@@ -115,6 +115,35 @@
 
 **DoD 1.10.3:** роль наполнена; Molecule converge+idempotence зелёные в CI; ansible-lint(production)/yamllint/syntax зелёные; секретов нет; на VPS: Docker Engine + compose-plugin нужных версий, демон active, deploy управляет docker без sudo, повторный прогон 0 changed. **Принято 2026-07-16 (коммиты 739d0a4 + 21325e1):** live под deploy — 6 changed; docker 27.5.1 + compose v2.32.4, демон active, `docker ps` без sudo из свежей сессии, daemon.json (json-file + live-restore) применён; **второй прогон 0 changed**. molecule converge+idempotence+verify зелёные локально, lint/yamllint/syntax/gitleaks зелёные. На приёмке пойман баг get_url (`src`→`url`). Тех-долг: `apt_repository` → `deb822_repository` до ansible-core 2.25.
 
+#### Детализация 1.10.4 — роль `app` (каркас: каталоги + unit) (2026-07-16, перед кодом)
+
+**Объём осознанно урезан до domain/архитектурно-независимого каркаса.** Полная роль app по плану = каталоги + выкладка `compose.prod.yml` + unit/автозапуск + entrypoint секретов Infisical. Сейчас делаем ТОЛЬКО независимое от нерешённого:
+- ✅ каталоги приложения;
+- ✅ systemd-unit автозапуска (установлен + daemon-reload, **НЕ enabled / НЕ started**);
+- ⏸ **выкладка `compose.prod.yml` — отложена до 1.11.1** (топологию прод-compose утверждает fable);
+- ⏸ **`/etc/assistant/bootstrap.env` (machine-identity Infisical) — отложен до 1.12.2** (прод-Infisical поднимается там; секреты — перевыпущенные по Б4). Каталог `/etc/assistant` создаём сейчас, файл — нет.
+
+Причина урезки: unit ссылается на будущий `compose.prod.yml` и не стартует, пока его нет; `bootstrap.env` требует прод-Infisical и ключей Б4. Заводить вслепую = брак.
+
+**Решения:**
+- **app_dir из group_vars** (`/opt/assistant`), владелец `deploy:deploy`. Сюда ляжет `compose.prod.yml` (1.11.1) и, при необходимости, bind-каталоги (их состав — вместе с compose, 1.11.1).
+- **systemd system-unit `assistant.service`**: `Type=oneshot`, `RemainAfterExit=yes`, `ExecStart=/usr/bin/docker compose -f {{ app_dir }}/compose.prod.yml up -d`, `ExecStop=… down`, `WorkingDirectory={{ app_dir }}`, `Requires`/`After=docker.service`, `User={{ deploy_user }}` (deploy в группе docker — без sudo), `WantedBy=multi-user.target`. **НЕ enable / НЕ start** — включение и первый старт в 1.12.3 (когда есть образ из GHCR + compose.prod.yml + секреты). Иначе на reboot systemd поднимет failed-unit.
+- **daemon-reload** — handler по изменению unit-файла (без изменения не перечитываем → идемпотентно). Обращается к systemd-шине, которой в molecule-контейнере нет (падает «Failed to connect to bus») → **гейтится по `virtualization_type`** (как base/docker); на реальном VPS выполняется.
+
+**Задачи роли `app` (tasks/main.yml, теги, handler reload systemd):**
+1. Каталог `{{ app_dir }}` (state: directory, owner/group `{{ deploy_user }}`, mode 0755).
+2. Каталог `/etc/assistant` (owner root, group `{{ deploy_user }}`, mode 0750 — под будущий bootstrap.env).
+3. systemd-unit `/etc/systemd/system/assistant.service` (copy/template, 0644, root) → notify Reload systemd. Содержимое — см. решения.
+(НЕ добавлять задачи enable/start; НЕ создавать bootstrap.env / compose.prod.yml.)
+
+**handlers/main.yml:** `Reload systemd` — `ansible.builtin.systemd: daemon_reload: true`, гейт по `virtualization_type` (как base/docker; в контейнере нет systemd-шины).
+
+**Molecule `verify.yml` дописать (контейнерно-совместимо):** `{{ app_dir }}` существует, владелец deploy; `/etc/assistant` существует, mode 0750; unit-файл `/etc/systemd/system/assistant.service` существует; `systemctl is-enabled assistant.service` — **не** enabled (мы не включали); содержимое unit содержит `ExecStart` с `{{ app_dir }}/compose.prod.yml`.
+
+**Живая приёмка на 31.76.15.130:** прогон под deploy `--become --tags app`; каталоги с нужным владельцем/правами; `assistant.service` установлен, `systemctl is-enabled` = disabled, `systemctl status` = inactive (не стартуем); повторный прогон 0 changed.
+
+**DoD 1.10.4 (каркас):** роль наполнена в объёме каркаса; Molecule converge+idempotence+verify зелёные; ansible-lint(production)/yamllint/syntax зелёные; секретов нет; на VPS каталоги + unit установлены, сервис не запущен, повторный прогон 0 changed. Отложенные части (compose.prod.yml → 1.11.1, bootstrap.env → 1.12.2, enable/start → 1.12.3) явно задокументированы. **Принято 2026-07-16:** live под deploy — 3 changed (каталоги + unit + daemon-reload); на VPS `/opt/assistant` (deploy:deploy 0755), `/etc/assistant` (root:deploy 0750), unit виден systemd, `is-enabled=disabled`/`is-active=inactive`; второй прогон 0 changed. molecule converge+idempotence+verify + lint/yamllint/syntax зелёные. Приёмка починила: ansible-lint (systemctl→stat wants-симлинка), гейт daemon-reload, литерал `/opt/assistant` в verify (group_vars не грузятся в verify-плее).
+
 ### 1.11. Прод-compose + Caddy + webhook  ≈ 1–1.5 дня
 - **1.11.1** `infra/compose.prod.yml`: контейнеры `gateway`, `worker`, `scheduler` (сейчас в dev — процессы на хосте!) + инфра (postgres, pgbouncer, redis×2, infisical, searxng, embeddings, prometheus, grafana, blackbox). Отличия от dev: `restart: unless-stopped`, resource limits, healthcheck+`depends_on`, без биндов на localhost, прод-профили. ≈ 0.5 дня. **Архитектурное — состав/топологию утверждает fable.**
 - **1.11.2** Caddy: TLS (Let's Encrypt по домену Б2), маршруты `/webhook/{secret_path}` → gateway (секретный путь поверх secret_token), `/oauth/callback` (задел 4.7), `/tribute/webhook` (задел этап 7); security headers, JSON access-логи (trace_id, этап 6), лимит размера тела. ≈ 0.5 дня.

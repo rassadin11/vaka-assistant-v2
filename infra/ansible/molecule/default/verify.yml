@@ -98,3 +98,60 @@
           - >-
             (docker_daemon_config_contents.content | b64decode | from_json)
             is mapping
+
+    - name: Check application directory
+      ansible.builtin.stat:
+        path: /opt/assistant
+      register: application_directory
+
+    - name: Verify application directory
+      ansible.builtin.assert:
+        that:
+          - application_directory.stat.exists
+          - application_directory.stat.isdir
+          - application_directory.stat.pw_name == 'deploy'
+
+    - name: Check assistant configuration directory
+      ansible.builtin.stat:
+        path: /etc/assistant
+      register: assistant_configuration_directory
+
+    - name: Verify assistant configuration directory
+      ansible.builtin.assert:
+        that:
+          - assistant_configuration_directory.stat.exists
+          - assistant_configuration_directory.stat.isdir
+          - assistant_configuration_directory.stat.mode == '0750'
+
+    - name: Check assistant systemd unit
+      ansible.builtin.stat:
+        path: /etc/systemd/system/assistant.service
+      register: assistant_systemd_unit
+
+    - name: Verify assistant systemd unit exists
+      ansible.builtin.assert:
+        that:
+          - assistant_systemd_unit.stat.exists
+
+    - name: Read assistant systemd unit
+      ansible.builtin.slurp:
+        src: /etc/systemd/system/assistant.service
+      register: assistant_systemd_unit_contents
+
+    - name: Verify assistant systemd unit compose command
+      ansible.builtin.assert:
+        that:
+          - >-
+            'ExecStart=/usr/bin/docker compose -f
+            /opt/assistant/compose.prod.yml up -d' in
+            (assistant_systemd_unit_contents.content | b64decode)
+
+    - name: Check assistant service enable symlink
+      ansible.builtin.stat:
+        path: /etc/systemd/system/multi-user.target.wants/assistant.service
+      register: assistant_service_wants_symlink
+
+    - name: Verify assistant service is not enabled
+      ansible.builtin.assert:
+        that:
+          - not assistant_service_wants_symlink.stat.exists
