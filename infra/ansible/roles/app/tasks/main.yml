@@ -129,6 +129,18 @@
     - app
     - configuration
 
+- name: Install deployment image environment template
+  ansible.builtin.template:
+    src: deploy.env.j2
+    dest: /etc/assistant/deploy.env
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0640"
+    force: false
+  tags:
+    - app
+    - configuration
+
 - name: Link Compose interpolation environment file
   ansible.builtin.file:
     src: /etc/assistant/infra.env
@@ -154,6 +166,7 @@
       RemainAfterExit=yes
       WorkingDirectory={{ app_dir }}
       User={{ deploy_user }}
+      EnvironmentFile=-/etc/assistant/deploy.env
       ExecStart=/usr/bin/docker compose -f {{ app_dir }}/compose.prod.yml up -d
       ExecStop=/usr/bin/docker compose -f {{ app_dir }}/compose.prod.yml down
 

@@ -1,0 +1,89 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: >-
+          Image tag to deploy; use sha-<full_sha> to pin or roll back.
+        required: true
+        default: latest
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_TAG: ${{ inputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy application
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: deploy
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: IMAGE_TAG
+          script_stop: true
+          script: |
+            # Rollback: rerun with the tag from /etc/assistant/deploy.env.prev.
+            set -eu
+
+            tag_pattern='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
+            if ! printf '%s' "$IMAGE_TAG" | grep -Eq "$tag_pattern"; then
+              echo "image_tag is not a valid Docker tag" >&2
+              exit 1
+            fi
+
+            app_image="ghcr.io/rassadin11/vaka-assistant-v2:${IMAGE_TAG}"
+            if [ -f /etc/assistant/deploy.env ]; then
+              sudo cp /etc/assistant/deploy.env /etc/assistant/deploy.env.prev
+              sudo chown deploy:deploy /etc/assistant/deploy.env.prev
+              sudo chmod 0640 /etc/assistant/deploy.env.prev
+            fi
+            printf '%s\n' "APP_IMAGE=${app_image}" |
+              sudo tee /etc/assistant/deploy.env >/dev/null
+            sudo chown deploy:deploy /etc/assistant/deploy.env
+            sudo chmod 0640 /etc/assistant/deploy.env
+
+            docker compose \
+              -f /opt/assistant/compose.prod.yml \
+              --env-file /opt/assistant/.env \
+              --env-file /etc/assistant/deploy.env pull
+            migration_command='export MIGRATIONS_DATABASE_URL='
+            migration_command="${migration_command}"'${MIGRATOR_DATABASE_URL:?};'
+            migration_command="${migration_command} exec alembic upgrade head"
+            docker run \
+              --rm \
+              --network personal-assistant-prod_default \
+              --env-file /etc/assistant/migrator.env \
+              "$app_image" \
+              sh -ec "$migration_command"
+            sudo systemctl restart assistant
+
+            health_status() {
+              health_format='{{if .State.Health}}{{.State.Health.Status}}'
+              health_format="${health_format}"'{{else}}'
+              health_format="${health_format}"'missing-healthcheck{{end}}'
+              docker inspect --format "$health_format" \
+                "$1" 2>/dev/null || true
+            }
+            gateway_container=personal-assistant-prod-gateway-1
+            caddy_container=personal-assistant-prod-caddy-1
+            deadline=$(( $(date +%s) + 300 ))
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+              gateway_health="$(health_status "$gateway_container")"
+              caddy_health="$(health_status "$caddy_container")"
+              if [ "$gateway_health" = healthy ] &&
+                [ "$caddy_health" = healthy ]; then
+                exit 0
+              fi
+              sleep 5
+            done
+
+            echo "Gateway or Caddy did not become healthy" \
+              "within five minutes" >&2
+            exit 1

@@ -151,6 +151,7 @@
       loop:
         - /etc/assistant/infra.env
         - /etc/assistant/bootstrap.env
+        - /etc/assistant/deploy.env
       register: environment_templates
 
     - name: Verify environment templates
@@ -194,6 +195,13 @@
           - >-
             'ExecStart=/usr/bin/docker compose -f
             /opt/assistant/compose.prod.yml up -d' in
+            (assistant_systemd_unit_contents.content | b64decode)
+
+    - name: Verify assistant systemd unit deployment environment file
+      ansible.builtin.assert:
+        that:
+          - >-
+            'EnvironmentFile=-/etc/assistant/deploy.env' in
             (assistant_systemd_unit_contents.content | b64decode)
 
     - name: Check assistant service enable symlink
