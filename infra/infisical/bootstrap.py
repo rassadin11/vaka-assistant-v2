@@ -40,6 +40,14 @@ INPUT_ENV_PATH = Path(
 OUTPUT_ENV_PATH = Path(
     os.getenv("BOOTSTRAP_OUTPUT_ENV_PATH", r"C:\Users\Artem\.assistant\infisical-dev.env")
 )
+SEED_KEYS = tuple(
+    key.strip()
+    for key in os.getenv(
+        "BOOTSTRAP_SEED_KEYS",
+        "TELEGRAM_BOT_TOKEN_PROD,TELEGRAM_BOT_TOKEN_TEST,OPENROUTER_API_KEY",
+    ).split(",")
+    if key.strip()
+)
 HTTP_TIMEOUT_SECONDS = 20.0
 
 
@@ -387,12 +395,7 @@ def seed_secrets(admin_token: str, project_id: str) -> None:
         generate_base64_kek()
     )
 
-    for key in (
-        "TELEGRAM_BOT_TOKEN_PROD",
-        "TELEGRAM_BOT_TOKEN_TEST",
-        "OPENROUTER_API_KEY",
-        "OAUTH_KEK",
-    ):
+    for key in (*SEED_KEYS, "OAUTH_KEK"):
         value = values.get(key)
         if value:
             upsert_secret(admin_token, project_id, key, value)
