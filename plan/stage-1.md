@@ -185,6 +185,19 @@
 
 **DoD 1.11.1:** compose.prod.yml в репо, `docker compose -f infra/compose.prod.yml config -q` зелёный локально (stub env-файлы) — проверку добавить в CI рядом с существующей валидацией compose; роль app выкладывает compose+конфиги+шаблон infra.env; molecule converge+idempotence+verify и ansible-lint(production)/yamllint/syntax зелёные; на VPS: файлы на месте, `docker compose … config -q` проходит, unit по-прежнему disabled/inactive, повторный прогон 0 changed; published-портов наружу нет (только 127.0.0.1); секретов в репо нет (gitleaks).
 
+#### Детализация 1.11.2 — Caddy (2026-07-16, fable, перед кодом)
+
+**Смена домена (правка Б2):** владелец выбрал и отрепоинтил **vaka-assistant.ru** (apex A → 31.76.15.130, подтверждено резолвом с самого VPS 2026-07-16), а не vakachat.ru из прежней записи Б2. `www`-записи нет — Caddy обслуживает только apex (www опционально добавить позже вместе с DNS-записью). Privacy policy (вторая половина Б2) — по-прежнему за владельцем, публиковаться будет на `https://vaka-assistant.ru/...`.
+
+**Решения:**
+- Сервис `caddy` в compose.prod.yml: пин `caddy:2-alpine`, ports `80:80`, `443:443` + `443:443/udp` (HTTP/3) — единственные published-порты наружу; volumes: `./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro` + named volumes `caddy_data` (сертификаты; терять нельзя — rate limit LE) и `caddy_config`; `restart: unless-stopped`, mem_limit 256m; **без depends_on** — Caddy живёт независимо от приложения (upstream down → 502), это позволяет принять TLS до появления образов приложения.
+- `infra/prod/caddy/Caddyfile`: глобально — `email` владельца для ACME; сайт `vaka-assistant.ru` — маршруты `/webhook/*`, `/oauth/callback` (задел 4.7), `/tribute/webhook` (задел этапа 7) → `reverse_proxy gateway:8000`; всё остальное → `respond 404`. **Секретный путь webhook в Caddyfile НЕ фигурирует** — валидация пути и secret_token остаётся в gateway (секрет не покидает Infisical). `/healthz` наружу не публикуем (меньше поверхность; blackbox ходит изнутри).
+- Security headers: HSTS (`max-age=31536000`), `X-Content-Type-Options nosniff`, `X-Frame-Options DENY`, `Referrer-Policy no-referrer`. Лимит тела: `request_body max_size 1MB` (webhook-апдейты Telegram маленькие). Access-логи: JSON в stdout (ротация — daemon.json), формат с полями по этапу 6.
+- Роль app: каталог `infra/prod/caddy` добавляется в цикл выкладки конфигов (`config/caddy`); molecule verify — файл Caddyfile выложен.
+- **Живая приёмка без приложения:** на сервере `docker compose -f compose.prod.yml up -d caddy` (только caddy; unit по-прежнему disabled — включение в 1.12.3, но caddy остаётся запущенным, сертификат уже в volume); проверка: `curl -sI https://vaka-assistant.ru/` → валидный LE-сертификат + 404; `/webhook/x` → 502 (upstream ещё не существует — это ожидаемо и правильно); HTTP→HTTPS редирект (Caddy делает сам); повторный прогон роли 0 changed.
+
+**DoD 1.11.2:** Caddyfile в репо, сервис в compose (`config -q` зелёный локально и на сервере); наружу опубликованы только 80/443 caddy; TLS-сертификат Let's Encrypt получен вживую на vaka-assistant.ru, HTTP→HTTPS редирект работает, маршруты проксируют на gateway (пока 502), остальное 404 с security-заголовками; molecule/lint/CI зелёные; секретов в диффе нет.
+
 ### 1.12. Доставка на сервер (CI-деплой)  ≈ 1–1.5 дня
 - **1.12.1** CI job: build + push образа в GHCR по тегу (Dockerfile уже есть; нужен workflow-шаг и права GHCR). ≈ 0.25 дня.
 - **1.12.2** Прод-Infisical: поднять инстанс на сервере, засеять прод-секреты (перевыпущенные по Б4), проверить machine identities gateway/worker/scheduler (механизм из 1.5). ≈ 0.25–0.5 дня.

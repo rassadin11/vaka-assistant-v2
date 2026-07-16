@@ -54,6 +54,8 @@
     mode: "0644"
     directory_mode: "0755"
   loop:
+    - src: "{{ playbook_dir }}/../../infra/prod/caddy"
+      dest: caddy
     - src: "{{ playbook_dir }}/../../infra/redis"
       dest: redis
     - src: "{{ playbook_dir }}/../../infra/pgbouncer"

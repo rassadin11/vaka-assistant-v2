@@ -1,6 +1,25 @@
 name: personal-assistant-prod
 
 services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    mem_limit: 256m
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    healthcheck:
+      test: ["CMD", "caddy", "version"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
   gateway:
     image: ${APP_IMAGE:-ghcr.io/rassadin11/vaka-assistant-v2:latest}
     command: python -m gateway serve
@@ -298,6 +317,8 @@ services:
       start_period: 60s
 
 volumes:
+  caddy_data:
+  caddy_config:
   postgres_data:
   pgbackrest_repo:
   pgbackrest_spool:

@@ -1,0 +1,31 @@
+{
+	email artem.rassadin21@gmail.com
+}
+
+vaka-assistant.ru {
+	log {
+		output stdout
+		format json
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	request_body {
+		max_size 1MB
+	}
+
+	@app path /webhook/* /oauth/callback /tribute/webhook
+	handle @app {
+		reverse_proxy gateway:8000
+	}
+
+	handle {
+		respond 404
+	}
+}

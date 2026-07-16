@@ -117,6 +117,7 @@
       loop:
         - /opt/assistant/compose.prod.yml
         - /opt/assistant/config
+        - /opt/assistant/config/caddy
         - /opt/assistant/config/redis
         - /opt/assistant/config/pgbouncer
         - /opt/assistant/config/searxng
