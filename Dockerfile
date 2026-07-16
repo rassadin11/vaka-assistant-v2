@@ -11,6 +11,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
+COPY alembic.ini ./
 COPY core/ core/
 COPY gateway/ gateway/
 COPY worker/ worker/
