@@ -150,6 +150,8 @@
 - **1.11.3** [владелец] DNS A-запись на сервер (по Б2). *Ожидание владельца.*
 - **1.11.4** Перевод gateway на **webhook** на проде: `python -m gateway set-webhook` с `PUBLIC_URL`, проверка secret_token и фильтра приватных чатов; отказ от polling в прод-режиме. ≈ 0.25 дня.
 
+  **Принято 2026-07-16 (живой e2e с владельцем).** Ключи Б4 (Telegram/OpenRouter; Groq оставлен старый — решение владельца, перевыпуск позже) досеяны в Infisical (10 секретов, +ADMIN_TELEGRAM_IDS); webhook зарегистрирован set-webhook'ом из app-образа, getWebhookInfo без ошибок. Решение: на время беты ассистент работает на **@vAssistantv2testbot** (боевой токен @vAssistantv2workbot остаётся каналом сводок/алертов — иначе смешение трафика и конфликт webhook↔getUpdates, 1B-x2); отдельный публичный бот — перед открытым запуском. Живой smoke владельцем: /start → онбординг (таймзона) → /approve → диалог: вопрос с web_search (1.4 с) и create_reminder (daily 9:00) — обе записи в tool_calls_log (result_status=ok, user_id инжектирован), ответы доставлены, история в messages. Это же закрывает e2e-часть 1B-x4. Наблюдение (не блокер): один ход занял ~3 мин (received 18:36:35 → ответ 18:39:34, deepseek-chat через OpenRouter) — следить за латентностью, при повторении разобрать по trace_id. prompt_version=v1 на проде корректен: v2-flash привязан к deepseek-v4-flash, дефолт модели пока deepseek-chat.
+
 #### Детализация 1.11.1 — `compose.prod.yml`: топология (2026-07-16, fable, перед кодом)
 
 **Уточнения плана по факту кода:**
