@@ -206,6 +206,19 @@
 - **1.12.3** Deploy-workflow: по ssh → `alembic upgrade head` ролью migrator → `docker compose -f compose.prod.yml pull && up -d` с гейтом по `/healthz`; осознанный деплой без watchtower; стратегия отката (предыдущий тег). ≈ 0.5 дня.
 - **1.12.4** Expand-contract на практике: воркеры рестартуют неатомарно — старый код должен работать поверх новой схемы; проверить на паре миграций. ≈ 0.25 дня.
 
+#### Детализация 1.12.1 — сборка образов в CI (2026-07-16, fable, перед кодом)
+
+**Объём (правка 1.11.1 действует):** три образа в GHCR, не один. Репозиторий публичный → пакеты GHCR делаем **публичными** (сервер тянет без docker login; код и так открыт). Права — `GITHUB_TOKEN` с `packages: write`.
+
+**Решения:**
+- Отдельный workflow `images.yml` (не в основной CI): push в `main` + `workflow_dispatch`. Теги каждого образа: `latest` + `sha-<short_sha>` (деплой 1.12.3 пинует sha; откат = предыдущий sha).
+- **app** (`ghcr.io/rassadin11/vaka-assistant-v2`): существующий корневой Dockerfile, собирается на каждый push в main.
+- **postgres** (`…-postgres`): контекст `infra/postgres/` (тот же build, что dev). Job гейтится по `paths: infra/postgres/**` + dispatch.
+- **embeddings** (`…-embeddings`): новый `Dockerfile.embeddings` в корне — python3.12-slim + uv, `uv sync --frozen --no-dev --group embeddings` (+ пин transformers <5 уже в pyproject), копируются `embeddings/` и метаданные проекта, CMD `uvicorn embeddings.app:app --host 0.0.0.0 --port 8000`. **Модель e5-large в образ НЕ запекается** (иначе образ ~5 ГБ): скачивается при первом старте в volume `hf_cache` → в compose.prod поднять `start_period` healthcheck embeddings до 600s (первый старт качает ~2.2 ГБ).
+- Кэш сборки: `docker/build-push-action` с gha-кэшем.
+
+**DoD 1.12.1:** workflow зелёный; три пакета видны в GHCR как public; `docker pull` всех трёх образов с VPS проходит без логина; app-образ запускает `python -m gateway --help`-эквивалент (smoke в workflow: `docker run --rm <image> python -c "import gateway, worker, core, tools"`); compose.prod: start_period embeddings обновлён; секретов в диффе нет.
+
 ### 1.13. Бэкапы на проде  ≈ 0.5–1 дня
 - **1.13.1** [владелец] Выбор S3-провайдера по Б3 (у другого провайдера, чем сервер). *Ожидание владельца.*
 - **1.13.2** pgBackRest → S3: ежедневный full + WAL, шифрование репозитория (переиспользовать наработки 1.8). ≈ 0.5 дня.

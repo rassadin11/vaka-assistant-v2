@@ -5,3 +5,5 @@ RUN apt-get update \
     && mkdir -p /var/lib/pgbackrest /var/log/pgbackrest /var/spool/pgbackrest \
     && chown -R postgres:postgres /var/lib/pgbackrest /var/log/pgbackrest /var/spool/pgbackrest \
     && rm -rf /var/lib/apt/lists/*
+
+# Production image is built and pushed by .github/workflows/images.yml (1.12.1).
