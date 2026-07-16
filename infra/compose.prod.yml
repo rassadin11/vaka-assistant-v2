@@ -22,7 +22,7 @@ services:
 
   gateway:
     image: ${APP_IMAGE:-ghcr.io/rassadin11/vaka-assistant-v2:latest}
-    command: python -m gateway serve
+    command: python -m core.secrets_entrypoint -- python -m gateway serve
     restart: unless-stopped
     mem_limit: 768m
     env_file:
@@ -53,7 +53,7 @@ services:
 
   worker:
     image: ${APP_IMAGE:-ghcr.io/rassadin11/vaka-assistant-v2:latest}
-    command: python -m worker
+    command: python -m core.secrets_entrypoint -- python -m worker
     restart: unless-stopped
     mem_limit: 1g
     deploy:
@@ -95,11 +95,12 @@ services:
     command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.prod.conf"]
     restart: unless-stopped
     mem_limit: 3g
-    env_file:
-      - ${ENV_FILE_DIR:-/etc/assistant}/infra.env
     environment:
       POSTGRES_USER: assistant
       POSTGRES_DB: assistant
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      PGBACKREST_REPO1_CIPHER_PASS: ${PGBACKREST_REPO1_CIPHER_PASS:?}
+      PGBACKREST_REPO2_CIPHER_PASS: ${PGBACKREST_REPO2_CIPHER_PASS:?}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - pgbackrest_repo:/var/lib/pgbackrest
@@ -123,7 +124,7 @@ services:
         condition: service_healthy
     volumes:
       - ./config/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
-      - ./config/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+      - ${ENV_FILE_DIR:-/etc/assistant}/pgbouncer-userlist.txt:/etc/pgbouncer/userlist.txt:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U assistant -d assistant"]
       interval: 5s
@@ -164,10 +165,9 @@ services:
     image: searxng/searxng:latest
     restart: unless-stopped
     mem_limit: 512m
-    env_file:
-      - ${ENV_FILE_DIR:-/etc/assistant}/infra.env
     environment:
       FORCE_OWNERSHIP: "false"
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?}
     volumes:
       - ./config/searxng/:/etc/searxng/:ro
     healthcheck:
@@ -218,10 +218,12 @@ services:
     image: grafana/grafana:latest
     restart: unless-stopped
     mem_limit: 512m
-    env_file:
-      - ${ENV_FILE_DIR:-/etc/assistant}/infra.env
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:?}
+      GRAFANA_METRICS_RO_PASSWORD: ${GRAFANA_METRICS_RO_PASSWORD:?}
+      TELEGRAM_ALERT_BOT_TOKEN: ${TELEGRAM_ALERT_BOT_TOKEN:-}
+      TELEGRAM_ALERT_CHAT_ID: ${TELEGRAM_ALERT_CHAT_ID:-}
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
@@ -257,11 +259,10 @@ services:
     image: postgres:16.10-alpine
     restart: unless-stopped
     mem_limit: 512m
-    env_file:
-      - ${ENV_FILE_DIR:-/etc/assistant}/infra.env
     environment:
       POSTGRES_USER: infisical
       POSTGRES_DB: infisical
+      POSTGRES_PASSWORD: ${INFISICAL_DB_PASSWORD:?}
     volumes:
       - infisical_postgres_data:/var/lib/postgresql/data
       - infisical_backups:/backups
@@ -290,8 +291,6 @@ services:
     image: infisical/infisical:v0.161.12
     restart: unless-stopped
     mem_limit: 1g
-    env_file:
-      - ${ENV_FILE_DIR:-/etc/assistant}/infra.env
     environment:
       NODE_ENV: production
       POSTGRES_USER: infisical
@@ -300,6 +299,9 @@ services:
       SITE_URL: http://localhost:8880
       TELEMETRY_ENABLED: "false"
       OTEL_TELEMETRY_COLLECTION_ENABLED: "false"
+      ENCRYPTION_KEY: ${INFISICAL_ENCRYPTION_KEY:?}
+      AUTH_SECRET: ${INFISICAL_AUTH_SECRET:?}
+      DB_CONNECTION_URI: ${INFISICAL_DB_CONNECTION_URI:?}
     ports:
       - "127.0.0.1:8880:8080"
     depends_on:

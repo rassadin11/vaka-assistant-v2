@@ -129,6 +129,17 @@
     - app
     - configuration
 
+- name: Link Compose interpolation environment file
+  ansible.builtin.file:
+    src: /etc/assistant/infra.env
+    dest: "{{ app_dir }}/.env"
+    state: link
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+  tags:
+    - app
+    - configuration
+
 - name: Install assistant systemd unit
   ansible.builtin.copy:
     content: |

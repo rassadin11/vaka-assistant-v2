@@ -1,7 +1,10 @@
 """Bootstrap a local development Infisical instance.
 
-This script is dev-only. It writes credentials only to the out-of-repository
-file configured by ``OUTPUT_ENV_PATH`` and masks sensitive values in stdout.
+This dev-safe script defaults to the existing local development topology. Its
+URL, organization, project, environment, and input/output paths can be
+overridden through ``BOOTSTRAP_*`` environment variables for a separate run.
+It writes credentials only to the configured out-of-repository file and masks
+sensitive values in stdout.
 """
 
 from __future__ import annotations
@@ -23,16 +26,20 @@ from urllib.request import Request, urlopen
 from core.crypto import generate_base64_kek
 
 INFISICAL_URL = os.getenv("INFISICAL_URL", "http://localhost:8880").rstrip("/")
-ADMIN_EMAIL = "admin@dev.local"
-ORG_NAME = "Personal Assistant Dev"
-PROJECT_NAME = "personal-assistant"
-PROJECT_SLUG = "personal-assistant"
-ENV_NAME = "Development"
-ENV_SLUG = "dev"
+ADMIN_EMAIL = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "admin@dev.local")
+ORG_NAME = os.getenv("BOOTSTRAP_ORG_NAME", "Personal Assistant Dev")
+PROJECT_NAME = os.getenv("BOOTSTRAP_PROJECT_NAME", "personal-assistant")
+PROJECT_SLUG = os.getenv("BOOTSTRAP_PROJECT_SLUG", "personal-assistant")
+ENV_NAME = os.getenv("BOOTSTRAP_ENV_NAME", "Development")
+ENV_SLUG = os.getenv("BOOTSTRAP_ENV_SLUG", "dev")
 SECRET_PATH = "/"
 SERVICE_NAMES = ("gateway", "worker", "scheduler")
-INPUT_ENV_PATH = Path(r"C:\Users\Artem\.assistant\bootstrap.env")
-OUTPUT_ENV_PATH = Path(r"C:\Users\Artem\.assistant\infisical-dev.env")
+INPUT_ENV_PATH = Path(
+    os.getenv("BOOTSTRAP_INPUT_ENV_PATH", r"C:\Users\Artem\.assistant\bootstrap.env")
+)
+OUTPUT_ENV_PATH = Path(
+    os.getenv("BOOTSTRAP_OUTPUT_ENV_PATH", r"C:\Users\Artem\.assistant\infisical-dev.env")
+)
 HTTP_TIMEOUT_SECONDS = 20.0
 
 

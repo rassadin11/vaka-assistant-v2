@@ -142,6 +142,29 @@ class InfisicalSecretsProvider:
             raise SecretNotFoundError(name)
         return value
 
+    def list_all(self) -> dict[str, str]:
+        """Fetch all shared secrets at the configured secret path."""
+
+        payload = self._transport.request_json(
+            "GET",
+            f"{self._settings.url}/api/v4/secrets?{self._query_params()}",
+            headers={"Authorization": f"Bearer {self._token()}"},
+        )
+        raw_secrets = payload.get("secrets")
+        if not isinstance(raw_secrets, list):
+            raise SecretProviderError("Infisical secret list response is invalid.")
+
+        secrets: dict[str, str] = {}
+        for raw_secret in raw_secrets:
+            if not isinstance(raw_secret, dict):
+                raise SecretProviderError("Infisical secret list response is invalid.")
+            name = raw_secret.get("secretKey")
+            value = raw_secret.get("secretValue")
+            if not isinstance(name, str) or not name or not isinstance(value, str):
+                raise SecretProviderError("Infisical secret list response is invalid.")
+            secrets[name] = value
+        return secrets
+
     def _token(self) -> str:
         if self._access_token is not None:
             return self._access_token

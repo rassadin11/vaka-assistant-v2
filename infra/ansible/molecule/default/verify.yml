@@ -160,6 +160,19 @@
           - item.stat.mode == '0640'
       loop: "{{ environment_templates.results }}"
 
+    - name: Check Compose interpolation environment symlink
+      ansible.builtin.stat:
+        path: /opt/assistant/.env
+      register: compose_environment_symlink
+
+    - name: Verify Compose interpolation environment symlink
+      ansible.builtin.assert:
+        that:
+          - compose_environment_symlink.stat.islnk
+          - >-
+            compose_environment_symlink.stat.lnk_source
+            == '/etc/assistant/infra.env'
+
     - name: Check assistant systemd unit
       ansible.builtin.stat:
         path: /etc/systemd/system/assistant.service

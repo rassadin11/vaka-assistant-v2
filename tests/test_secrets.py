@@ -85,3 +85,36 @@ def test_infisical_secrets_provider_reuses_access_token() -> None:
         call for call in transport.calls if call[1].endswith("/api/v1/auth/universal-auth/login")
     ]
     assert len(login_calls) == 1
+
+
+def test_infisical_secrets_provider_lists_all_secrets() -> None:
+    class ListTransport(FakeTransport):
+        def request_json(
+            self,
+            method: str,
+            url: str,
+            *,
+            headers: Mapping[str, str] | None = None,
+            json_body: Mapping[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            if url.endswith("/api/v1/auth/universal-auth/login"):
+                return super().request_json(method, url, headers=headers, json_body=json_body)
+            return {
+                "secrets": [
+                    {"secretKey": "FIRST", "secretValue": "first-value"},
+                    {"secretKey": "SECOND", "secretValue": "second-value"},
+                ]
+            }
+
+    provider = InfisicalSecretsProvider(
+        InfisicalSettings(
+            url="http://infisical.local",
+            client_id="client-id",
+            client_secret="client-secret",
+            project_id="project-id",
+            environment="dev",
+        ),
+        transport=ListTransport(),
+    )
+
+    assert provider.list_all() == {"FIRST": "first-value", "SECOND": "second-value"}
