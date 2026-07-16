@@ -144,16 +144,20 @@
           - assistant_configuration_directory.stat.isdir
           - assistant_configuration_directory.stat.mode == '0750'
 
-    - name: Check infrastructure environment template
+    - name: Check environment templates
       ansible.builtin.stat:
-        path: /etc/assistant/infra.env
-      register: infrastructure_environment_template
+        path: "{{ item }}"
+      loop:
+        - /etc/assistant/infra.env
+        - /etc/assistant/bootstrap.env
+      register: environment_templates
 
-    - name: Verify infrastructure environment template
+    - name: Verify environment templates
       ansible.builtin.assert:
         that:
-          - infrastructure_environment_template.stat.exists
-          - infrastructure_environment_template.stat.mode == '0640'
+          - item.stat.exists
+          - item.stat.mode == '0640'
+      loop: "{{ environment_templates.results }}"
 
     - name: Check assistant systemd unit
       ansible.builtin.stat:

@@ -74,6 +74,17 @@
     - app
     - configuration
 
+- name: Create production PostgreSQL configuration directory
+  ansible.builtin.file:
+    path: "{{ app_dir }}/config/postgres"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0755"
+  tags:
+    - app
+    - configuration
+
 - name: Install production PostgreSQL configuration files
   ansible.builtin.copy:
     src: "{{ item.src }}"
@@ -88,6 +99,18 @@
       dest: pgbackrest.conf
     - src: "{{ playbook_dir }}/../../infra/prod/postgres/postgresql.prod.conf"
       dest: postgresql.prod.conf
+  tags:
+    - app
+    - configuration
+
+- name: Install bootstrap environment template
+  ansible.builtin.template:
+    src: bootstrap.env.j2
+    dest: /etc/assistant/bootstrap.env
+    owner: root
+    group: "{{ deploy_user }}"
+    mode: "0640"
+    force: false
   tags:
     - app
     - configuration
