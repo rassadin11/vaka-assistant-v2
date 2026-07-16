@@ -196,6 +196,8 @@
 - Роль app: каталог `infra/prod/caddy` добавляется в цикл выкладки конфигов (`config/caddy`); molecule verify — файл Caddyfile выложен.
 - **Живая приёмка без приложения:** на сервере `docker compose -f compose.prod.yml up -d caddy` (только caddy; unit по-прежнему disabled — включение в 1.12.3, но caddy остаётся запущенным, сертификат уже в volume); проверка: `curl -sI https://vaka-assistant.ru/` → валидный LE-сертификат + 404; `/webhook/x` → 502 (upstream ещё не существует — это ожидаемо и правильно); HTTP→HTTPS редирект (Caddy делает сам); повторный прогон роли 0 changed.
 
+**Принято 2026-07-16 (коммит a4a12a2):** Codex-реализация, приёмка fable без правок. Живая приёмка: роль app доставила config/caddy (2 changed → 0 changed), `docker compose up -d caddy` на сервере — healthy; сертификат Let's Encrypt получен вживую (issuer LE/YE1, до 2026-10-14), `https://vaka-assistant.ru/` → 404 с полным набором security-заголовков (HSTS, nosniff, DENY, no-referrer, Server скрыт), HTTP→HTTPS 308, `/webhook/*` → 502 (upstream ожидаемо отсутствует до 1.12); проверено и с сервера, и с внешней машины. gitleaks чисто, оба CI-workflow зелёные. Caddy оставлен запущенным (серт в caddy_data).
+
 **DoD 1.11.2:** Caddyfile в репо, сервис в compose (`config -q` зелёный локально и на сервере); наружу опубликованы только 80/443 caddy; TLS-сертификат Let's Encrypt получен вживую на vaka-assistant.ru, HTTP→HTTPS редирект работает, маршруты проксируют на gateway (пока 502), остальное 404 с security-заголовками; molecule/lint/CI зелёные; секретов в диффе нет.
 
 ### 1.12. Доставка на сервер (CI-деплой)  ≈ 1–1.5 дня
