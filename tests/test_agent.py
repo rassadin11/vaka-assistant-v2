@@ -65,6 +65,7 @@ async def test_tool_round_trip_appends_trusted_result_to_next_llm_call() -> None
 
     assert result.text == "Сейчас день"
     assert result.tool_calls == 1
+    assert result.tool_names == ("get_current_time",)
     second_messages = provider.calls[1].messages
     assert second_messages[-1].role == "tool"
     assert second_messages[-1].content == f"context-user={_context().user_id}"
@@ -219,6 +220,7 @@ async def test_tool_limit_stops_before_dispatch() -> None:
     assert result.stop_reason == "tool_limit"
     assert result.text == TOOL_LIMIT_TEXT
     assert result.tool_calls == 0
+    assert result.tool_names == ()
 
 
 async def test_budget_accumulates_costs_across_generations() -> None:
@@ -238,6 +240,7 @@ async def test_budget_accumulates_costs_across_generations() -> None:
     assert result.text == BUDGET_TEXT
     assert result.total_cost_usd == Decimal("0.04")
     assert result.llm_calls == 2
+    assert result.tool_names == ()
 
 
 async def test_timeout_returns_fallback() -> None:

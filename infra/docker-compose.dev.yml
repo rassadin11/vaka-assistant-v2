@@ -135,6 +135,45 @@ services:
       retries: 20
       start_period: 5s
 
+  webapp:
+    # Requires locally provisioned WEBAPP_INFISICAL_* credentials; kept opt-in
+    # so the pre-existing dev stack and CI do not need Telegram secrets.
+    profiles: ["webapp"]
+    build:
+      context: ..
+    command: python -m core.secrets_entrypoint -- python -m webapp
+    environment:
+      INFISICAL_URL: http://infisical:8080
+      INFISICAL_CLIENT_ID: ${WEBAPP_INFISICAL_CLIENT_ID:-}
+      INFISICAL_CLIENT_SECRET: ${WEBAPP_INFISICAL_CLIENT_SECRET:-}
+      INFISICAL_PROJECT_ID: ${INFISICAL_PROJECT_ID:-}
+      INFISICAL_ENV: ${INFISICAL_ENV:-dev}
+      DATABASE_URL: postgresql://app:dev-local-only@pgbouncer:6432/assistant
+      REDIS_CACHE_URL: redis://redis-cache:6379/0
+      REDIS_QUEUE_URL: redis://redis-queue:6379/0
+      LOG_FORMAT: text
+    ports:
+      - "127.0.0.1:8001:8001"
+    depends_on:
+      infisical:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from urllib.request import urlopen; urlopen('http://127.0.0.1:8001/app/healthz')"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
   infisical-db:
     image: postgres:16.10-alpine
     environment:

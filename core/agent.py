@@ -61,6 +61,7 @@ class AgentResult:
     total_cost_usd: Decimal
     llm_calls: int
     tool_calls: int
+    tool_names: tuple[str, ...] = ()
 
 
 class AgentLoop:
@@ -122,6 +123,7 @@ class AgentLoop:
         total_cost_usd = Decimal(0)
         llm_calls = 0
         tool_calls = 0
+        invoked_tools: list[str] = []
         malformed_rounds = 0
         definitions = self._dispatcher.definitions()
         while True:
@@ -140,6 +142,7 @@ class AgentLoop:
                     total_cost_usd,
                     llm_calls,
                     tool_calls,
+                    tuple(invoked_tools),
                 )
             if tool_calls + len(tool_requests) > self._config.max_tool_calls:
                 return AgentResult(
@@ -154,6 +157,7 @@ class AgentLoop:
             malformed_in_round = False
             for tool_call in tool_requests:
                 active_tool_name[0] = tool_call.name
+                invoked_tools.append(tool_call.name)
                 try:
                     result_content = await self._dispatcher.dispatch(tool_call, context)
                 except MalformedToolCallError as exc:

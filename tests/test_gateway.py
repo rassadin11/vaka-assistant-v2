@@ -1,13 +1,16 @@
 """Unit tests for the gateway: filtering, dedup invariant, webhook auth, health."""
 
 import asyncio
+from dataclasses import replace
 from typing import Any
 
 import httpx
 import pytest
+from aiogram.types import MenuButtonWebApp
 
 from core.envelope import UpdateEnvelope
 from core.queue import QueueName, RedisSettings
+from gateway import __main__ as gateway_main
 from gateway.app import UNSUPPORTED_MESSAGE_TEXT, create_app, handle_update
 from gateway.config import GatewayConfig
 
@@ -26,6 +29,38 @@ def _config() -> GatewayConfig:
         rate_limit_per_minute=20,
         rate_limit_burst=5,
     )
+
+
+async def test_set_menu_button_uses_public_mini_app_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSession:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FakeBot:
+        def __init__(self) -> None:
+            self.session = FakeSession()
+            self.menu_button: MenuButtonWebApp | None = None
+
+        async def set_chat_menu_button(self, *, menu_button: MenuButtonWebApp) -> None:
+            self.menu_button = menu_button
+
+    fake_bot = FakeBot()
+    config = replace(_config(), public_url="https://assistant.example/")
+    monkeypatch.setattr(gateway_main, "config_from_env", lambda: config)
+    monkeypatch.setattr(gateway_main, "telegram_bot_token", lambda: "test-token")
+    monkeypatch.setattr(gateway_main, "Bot", lambda _token: fake_bot)
+
+    await gateway_main._set_menu_button()
+
+    assert fake_bot.menu_button is not None
+    assert fake_bot.menu_button.text == "Открыть"
+    assert fake_bot.menu_button.web_app.url == "https://assistant.example/app/"
+    assert fake_bot.session.closed
 
 
 class FakeQueueRedis:

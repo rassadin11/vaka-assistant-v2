@@ -152,6 +152,7 @@
         - /etc/assistant/infra.env
         - /etc/assistant/bootstrap.env
         - /etc/assistant/deploy.env
+        - /etc/assistant/webapp.env
       register: environment_templates
 
     - name: Verify environment templates

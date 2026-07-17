@@ -55,6 +55,7 @@ from core.tools_dispatch import ToolDispatcher
 from core.usage_recorder import UsageRecord, UsageRecordingProvider
 from core.usage_store import save_usage
 from worker.app import SendReplyCallback
+from worker.reply import WorkerReply, mini_app_button_for_tools
 
 UNSUPPORTED_CONTENT_TEXT = "Пока я понимаю только текст."
 LOGGER = logging.getLogger(__name__)
@@ -109,7 +110,9 @@ class AgentProcessor:
         self._prompt_version = prompt_version
         self._background_tasks: set[asyncio.Task[None]] = set()
 
-    async def process(self, envelope: UpdateEnvelope, context: TaskContext) -> str | None:
+    async def process(
+        self, envelope: UpdateEnvelope, context: TaskContext
+    ) -> str | WorkerReply | None:
         """Process text, retaining the dialogue and relaying optional progress notifications."""
 
         if envelope.kind not in {"text", "agent_task"}:
@@ -211,6 +214,10 @@ class AgentProcessor:
             )
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
+        if envelope.kind == "text":
+            button = mini_app_button_for_tools(result.tool_names)
+            if button is not None:
+                return WorkerReply(reply_text, button)
         return reply_text
 
     async def _save_trimmed_summary(

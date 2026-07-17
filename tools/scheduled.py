@@ -13,6 +13,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from core.context import TaskContext
 from core.db import user_transaction
+from core.reminders_service import (
+    ScheduledTaskNotFound,
+    ScheduledTaskStateConflict,
+    cancel_scheduled_task,
+)
 from core.tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
 
 MAX_ACTIVE_SCHEDULED_TASKS = 10
@@ -178,16 +183,10 @@ async def _cancel_scheduled_task(
     args: CancelScheduledTaskArgs,
 ) -> ToolResult:
     async with user_transaction(pool, ctx.user_id) as connection:
-        result = await connection.execute(
-            """
-            UPDATE scheduled_tasks
-            SET status = 'cancelled'
-            WHERE id = $1 AND kind = 'agent_task' AND status = 'active'
-            """,
-            args.task_id,
-        )
-    if result == "UPDATE 0":
-        return ToolResult(status="error", error="Активная задача не найдена.")
+        try:
+            await cancel_scheduled_task(connection, args.task_id, kind="agent_task")
+        except (ScheduledTaskNotFound, ScheduledTaskStateConflict):
+            return ToolResult(status="error", error="Активная задача не найдена.")
     return ToolResult(status="ok", payload={"id": args.task_id, "status": "cancelled"})
 
 

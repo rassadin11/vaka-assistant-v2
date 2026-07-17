@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, NoReturn, cast
 
 import asyncpg
 from aiogram import Bot
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from prometheus_client import start_http_server
 from redis.asyncio import Redis
 
@@ -46,7 +46,13 @@ from core.telegram_sender import TelegramSender
 from core.tools import ToolRegistry
 from tools.registry import register_builtin_tools
 from worker.agent_processor import AgentProcessor
-from worker.app import NotifyAdminCallback, SendReplyCallback, SendTypingCallback, Worker
+from worker.app import (
+    NotifyAdminCallback,
+    SendReplyCallback,
+    SendReplyWithButtonCallback,
+    SendTypingCallback,
+    Worker,
+)
 from worker.config import config_from_env
 from worker.confirmations import ConfirmationProcessor
 from worker.onboarding import (
@@ -59,6 +65,7 @@ from worker.onboarding import (
 )
 from worker.outbox import OutboxProcessor
 from worker.processor import ContextualProcessor, EchoProcessor, Processor
+from worker.reply import MiniAppButton, WorkerReply
 from worker.scheduler import SchedulerProcessor
 
 if TYPE_CHECKING:
@@ -96,7 +103,9 @@ async def _run() -> None:
     bot: Bot | None = None
     token = optional_telegram_bot_token()
     reply_stream = os.getenv("WORKER_REPLY_STREAM")
+    public_url = os.getenv("PUBLIC_URL")
     send_reply: SendReplyCallback
+    send_reply_with_button: SendReplyWithButtonCallback | None
     send_typing: SendTypingCallback
     notify_admin: NotifyAdminCallback
     rich_send: RichSendCallback
@@ -105,6 +114,7 @@ async def _run() -> None:
     answer_callback: AnswerCallback
     if reply_stream is not None:
         send_reply = _stream_reply(queue_redis, reply_stream)
+        send_reply_with_button = None
         send_typing = _log_typing
         notify_admin = _stream_admin(queue_redis, reply_stream)
         rich_send = _rich_send_from_reply(send_reply)
@@ -113,6 +123,7 @@ async def _run() -> None:
         answer_callback = _log_callback_answer
     elif token is None:
         send_reply = _log_reply
+        send_reply_with_button = None
         send_typing = _log_typing
         notify_admin = _log_admin
         rich_send = _log_rich_send
@@ -123,6 +134,7 @@ async def _run() -> None:
         bot = Bot(token)
         sender = TelegramSender(bot, admin_chat_ids=admin_ids)
         send_reply = sender.send_message
+        send_reply_with_button = _mini_app_button_sender(sender, public_url)
         send_typing = sender.send_typing
         notify_admin = sender.notify_admins
         rich_send = _rich_send_adapter(sender)
@@ -190,6 +202,7 @@ async def _run() -> None:
         cache_redis=cache_redis,
         processor=processor,
         send_reply=send_reply,
+        send_reply_with_button=send_reply_with_button,
         send_typing=send_typing,
         notify_admin=notify_admin,
         config=config,
@@ -294,6 +307,29 @@ async def _create_app_pool_or_fail() -> asyncpg.Pool:
             exc_info=True,
         )
         raise
+
+
+def _mini_app_button_sender(
+    sender: TelegramSender, public_url: str | None
+) -> SendReplyWithButtonCallback | None:
+    if not public_url:
+        return None
+    base = public_url.rstrip("/")
+
+    async def send(chat_id: int, text: str, button: MiniAppButton) -> None:
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=button.text,
+                        web_app=WebAppInfo(url=f"{base}/app/?screen={button.screen}"),
+                    )
+                ]
+            ]
+        )
+        await sender.send_message(chat_id, text, reply_markup=markup)
+
+    return send
 
 
 def _rich_send_adapter(sender: TelegramSender) -> RichSendCallback:
@@ -497,7 +533,9 @@ class KindRouter:
         self._photos = photos
         self._voice = voice
 
-    async def process(self, envelope: UpdateEnvelope, context: TaskContext) -> str | None:
+    async def process(
+        self, envelope: UpdateEnvelope, context: TaskContext
+    ) -> str | WorkerReply | None:
         if envelope.kind == "document":
             return await self._documents.process(envelope, context)
         if envelope.kind == "photo":

@@ -18,6 +18,7 @@ from core.context import TaskContext
 from core.db import service_transaction
 from core.envelope import UpdateEnvelope
 from worker.processor import ContextualProcessor
+from worker.reply import WorkerReply
 
 APPLICATION_RECEIVED_TEXT = (
     "Привет! Это закрытая бета персонального ассистента. Заявка на доступ отправлена — "
@@ -35,7 +36,8 @@ ASSISTANT_CAPABILITIES_TEXT = (
     "• напоминать о делах — «напомни завтра в 10 позвонить маме»\n"
     "• искать в интернете — «что нового у Яндекса? поищи»\n"
     "• разбирать PDF-документы — пришлите файл и спрашивайте по содержимому\n"
-    "• запоминать важное — «запомни: у меня аллергия на арахис»\n\n"
+    "• запоминать важное — «запомни: у меня аллергия на арахис»\n"
+    "• показать наглядно — кнопка меню открывает календарь напоминаний и дашборд расходов\n\n"
     "Пишите как удобно, своими словами — я пойму. Я в бете и учусь: если что-то пойдёт не так, "
     "напишите /feedback <текст> — прочитаю и исправлюсь."
 )
@@ -178,7 +180,7 @@ class OnboardingProcessor:
         self._confirmation_handler = confirmation_handler
         self._logger = logger if logger is not None else LOGGER
 
-    async def process(self, envelope: UpdateEnvelope) -> str | None:
+    async def process(self, envelope: UpdateEnvelope) -> str | WorkerReply | None:
         """Process onboarding state, delegating active user traffic to the inner processor."""
 
         if envelope.kind == "callback":
@@ -359,7 +361,7 @@ class OnboardingProcessor:
         envelope: UpdateEnvelope,
         text: str | None,
         user: UserRow,
-    ) -> str | None:
+    ) -> str | WorkerReply | None:
         context = TaskContext(
             user_id=user.id,
             tg_user_id=user.tg_user_id,

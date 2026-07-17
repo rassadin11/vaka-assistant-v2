@@ -44,6 +44,22 @@
       "datasource": {"type": "postgres", "uid": "postgres"},
       "targets": [{"format": "table", "rawSql": "SELECT tool_name, COUNT(*) AS calls FROM tool_calls_log WHERE created_at >= now() - interval '7 days' GROUP BY tool_name ORDER BY calls DESC;", "refId": "A"}],
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16}
+    },
+    {
+      "id": 6,
+      "title": "Открытия Mini App",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(increase(webapp_app_opened_total[1d]))", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24}
+    },
+    {
+      "id": 7,
+      "title": "Использование экранов Mini App",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum by (route) (increase(webapp_requests_total{route=~\".*finance.*|.*calendar.*\"}[1d]))", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24}
     }
   ]
 }

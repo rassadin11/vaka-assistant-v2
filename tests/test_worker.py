@@ -10,6 +10,7 @@ from core.envelope import UpdateEnvelope
 from core.queue import CONSUMER_GROUPS, DLQ_STREAM, USER_DLQ_MESSAGE, QueueName, stream_key
 from worker.app import RETRY_NOTICE_TEXT, Worker, WorkerConfig
 from worker.processor import Processor
+from worker.reply import MiniAppButton, WorkerReply
 
 
 def _envelope(**overrides: object) -> UpdateEnvelope:
@@ -249,12 +250,16 @@ class CallbackRecorder:
         self.replies: list[tuple[int, str]] = []
         self.typing: list[int] = []
         self.admin: list[str] = []
+        self.button_replies: list[tuple[int, str, MiniAppButton]] = []
 
     async def send_reply(self, chat_id: int, text: str) -> None:
         self.replies.append((chat_id, text))
 
     async def send_typing(self, chat_id: int) -> None:
         self.typing.append(chat_id)
+
+    async def send_reply_with_button(self, chat_id: int, text: str, button: MiniAppButton) -> None:
+        self.button_replies.append((chat_id, text, button))
 
     async def notify_admin(self, text: str) -> None:
         self.admin.append(text)
@@ -274,6 +279,7 @@ def _worker(
             cache_redis=cache_redis,
             processor=processor if processor is not None else RecordingProcessor(),
             send_reply=local_callbacks.send_reply,
+            send_reply_with_button=local_callbacks.send_reply_with_button,
             send_typing=local_callbacks.send_typing,
             notify_admin=local_callbacks.notify_admin,
             config=config
@@ -287,6 +293,17 @@ def _worker(
         ),
         local_callbacks,
     )
+
+
+async def test_deliver_reply_selects_button_transport_or_plain_text() -> None:
+    worker, callbacks = _worker(FakeQueueRedis(), FakeCacheRedis())
+    button = MiniAppButton("Открыть финансы", "finance")
+
+    await worker._deliver_reply(42, WorkerReply("with button", button))
+    await worker._deliver_reply(42, "plain")
+
+    assert callbacks.button_replies == [(42, "with button", button)]
+    assert callbacks.replies == [(42, "plain")]
 
 
 async def test_priority_reads_interactive_before_background() -> None:

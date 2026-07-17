@@ -25,6 +25,15 @@ vaka-assistant.ru {
 		reverse_proxy gateway:8000
 	}
 
+	@miniapp path /app /app/*
+	header @miniapp {
+		-X-Frame-Options
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'self'"
+	}
+	handle @miniapp {
+		reverse_proxy webapp:8001
+	}
+
 	handle {
 		respond 404
 	}

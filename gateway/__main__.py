@@ -10,7 +10,7 @@ from typing import NoReturn
 
 import uvicorn
 from aiogram import Bot, Dispatcher
-from aiogram.types import Update
+from aiogram.types import MenuButtonWebApp, Update, WebAppInfo
 from redis.asyncio import Redis
 
 from core.logging_setup import setup_logging
@@ -33,6 +33,9 @@ def main() -> NoReturn:
         raise SystemExit(0)
     if command == "set-webhook":
         asyncio.run(_set_webhook())
+        raise SystemExit(0)
+    if command == "set-menu-button":
+        asyncio.run(_set_menu_button())
         raise SystemExit(0)
     raise SystemExit(f"unknown gateway command: {command}")
 
@@ -84,6 +87,24 @@ async def _set_webhook() -> None:
             webhook_url,
             secret_token=config.telegram_webhook_secret_token,
             allowed_updates=ALLOWED_UPDATES,
+        )
+    finally:
+        await bot.session.close()
+
+
+async def _set_menu_button() -> None:
+    config = config_from_env()
+    public_url = config.public_url
+    if public_url is None:
+        raise RuntimeError("PUBLIC_URL is required for set-menu-button.")
+
+    bot = Bot(telegram_bot_token())
+    try:
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="Открыть",
+                web_app=WebAppInfo(url=f"{public_url.rstrip('/')}/app/"),
+            )
         )
     finally:
         await bot.session.close()

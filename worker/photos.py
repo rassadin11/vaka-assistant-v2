@@ -25,6 +25,7 @@ from worker.documents import (
     _monthly_pages_key,
 )
 from worker.processor import ContextualProcessor
+from worker.reply import WorkerReply
 from worker.voice import MESSAGE_LIMIT_TEXT, SOFT_REFUSE_TEXT
 
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
@@ -54,7 +55,9 @@ class PhotoOcrProcessor:
         self._inner = inner
         self._logger = logger if logger is not None else LOGGER
 
-    async def process(self, envelope: UpdateEnvelope, context: TaskContext) -> str | None:
+    async def process(
+        self, envelope: UpdateEnvelope, context: TaskContext
+    ) -> str | WorkerReply | None:
         """Apply limits, OCR the photo, and pass caption plus text to the agent."""
 
         try:

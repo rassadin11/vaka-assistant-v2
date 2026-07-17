@@ -17,6 +17,26 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy
 
+  miniapp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: miniapp/package-lock.json
+      - run: npm ci
+        working-directory: miniapp
+      - run: npm run lint
+        working-directory: miniapp
+      - run: npm run typecheck
+        working-directory: miniapp
+      - run: npm test
+        working-directory: miniapp
+      - run: npm run build
+        working-directory: miniapp
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -42,6 +62,7 @@ jobs:
           mkdir -p /tmp/assistant-compose-env
           touch /tmp/assistant-compose-env/bootstrap.env
           touch /tmp/assistant-compose-env/infra.env
+          touch /tmp/assistant-compose-env/webapp.env
           touch /tmp/assistant-compose-env/pgbouncer-userlist.txt
           cat > /tmp/assistant-compose-env/.env <<'EOF'
           POSTGRES_PASSWORD=ci-placeholder

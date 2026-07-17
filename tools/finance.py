@@ -6,8 +6,8 @@ import asyncio
 import io
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import UTC, date, datetime, time, timedelta
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from datetime import UTC, date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from typing import Literal, cast
 from zoneinfo import ZoneInfo
@@ -18,12 +18,42 @@ from pydantic import BaseModel, ConfigDict
 
 from core.context import TaskContext
 from core.db import user_transaction
+from core.finance_service import (
+    MONEY_QUANTUM,
+)
+from core.finance_service import (
+    aggregation_payload_row as _aggregation_payload_row,
+)
+from core.finance_service import (
+    aggregation_query as _aggregation_query,
+)
+from core.finance_service import (
+    as_decimal as _as_decimal,
+)
+from core.finance_service import (
+    day_bounds as _day_bounds,
+)
+from core.finance_service import (
+    local_midnight as _local_midnight,
+)
+from core.finance_service import (
+    money_text as _money_text,
+)
+from core.finance_service import (
+    month_bounds as _month_bounds,
+)
+from core.finance_service import (
+    parse_timestamp as _parse_timestamp,
+)
+from core.finance_service import (
+    quantize_money as _quantize_money,
+)
+from core.finance_summary import FinanceSummaryRedis, invalidate_finance_generation
 from core.tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
 
 matplotlib.use("Agg")
 
 LOGGER = logging.getLogger(__name__)
-MONEY_QUANTUM = Decimal("0.01")
 # Keep strong references so the event loop cannot garbage-collect in-flight sends.
 _CHART_TASKS: set[asyncio.Task[None]] = set()
 SendPhoto = Callable[[int, bytes, str | None], Awaitable[None]]
@@ -85,11 +115,15 @@ def register_finance_tools(
     registry: ToolRegistry,
     app_pool: asyncpg.Pool,
     send_photo: SendPhoto | None,
+    cache_redis: FinanceSummaryRedis,
 ) -> None:
     """Register the v1 finance tools with their worker-owned dependencies."""
 
     async def add_transaction(ctx: TaskContext, args: BaseModel) -> ToolResult:
-        return await _add_transaction(app_pool, ctx, cast(AddTransactionArgs, args))
+        result = await _add_transaction(app_pool, ctx, cast(AddTransactionArgs, args))
+        if result.status == "ok":
+            await invalidate_finance_generation(cache_redis, ctx.user_id)
+        return result
 
     async def query_transactions(ctx: TaskContext, args: BaseModel) -> ToolResult:
         return await _query_transactions(
@@ -315,58 +349,6 @@ async def _get_budget_status(pool: asyncpg.Pool, ctx: TaskContext) -> ToolResult
     return ToolResult(status="ok", payload={"budgets": budgets})
 
 
-def _aggregation_query(
-    group_by: str,
-    start: datetime,
-    end: datetime,
-    category: str | None,
-    timezone: str,
-) -> tuple[str, tuple[object, ...]]:
-    filter_sql = "WHERE ts >= $1 AND ts < $2 AND ($3::text IS NULL OR category = $3)"
-    if group_by == "category":
-        return (
-            f"""
-            SELECT category, currency, SUM(amount) AS total
-            FROM transactions {filter_sql}
-            GROUP BY category, currency
-            ORDER BY category, currency
-            LIMIT 101
-            """,
-            (start, end, category),
-        )
-    if group_by == "day":
-        return (
-            f"""
-            SELECT (ts AT TIME ZONE $4)::date AS day, currency, SUM(amount) AS total
-            FROM transactions {filter_sql}
-            GROUP BY day, currency
-            ORDER BY day, currency
-            LIMIT 101
-            """,
-            (start, end, category, timezone),
-        )
-    return (
-        f"""
-        SELECT currency, SUM(amount) AS total
-        FROM transactions {filter_sql}
-        GROUP BY currency
-        ORDER BY currency
-        LIMIT 101
-        """,
-        (start, end, category),
-    )
-
-
-def _aggregation_payload_row(group_by: str, record: asyncpg.Record) -> dict[str, str]:
-    row = {"total": _money_text(record["total"])}
-    if group_by == "category":
-        row["category"] = str(record["category"])
-    elif group_by == "day":
-        day = record["day"]
-        row["day"] = day.isoformat() if isinstance(day, date) else str(day)
-    return row
-
-
 def _schedule_chart(send_photo: SendPhoto, chat_id: int, records: list[asyncpg.Record]) -> None:
     try:
         png = _render_chart(records)
@@ -425,56 +407,9 @@ def _render_chart(records: list[asyncpg.Record]) -> bytes:
     return output.getvalue()
 
 
-def _parse_timestamp(raw: str | None, timezone_name: str) -> datetime:
-    if raw is None:
-        return datetime.now(UTC)
-    parsed = datetime.fromisoformat(raw)
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=ZoneInfo(timezone_name))
-    return parsed
-
-
-def _day_bounds(timestamp: datetime, timezone: ZoneInfo) -> tuple[datetime, datetime]:
-    local_date = timestamp.astimezone(timezone).date()
-    return (
-        _local_midnight(local_date, timezone),
-        _local_midnight(local_date + timedelta(days=1), timezone),
-    )
-
-
-def _month_bounds(timestamp: datetime, timezone: ZoneInfo) -> tuple[datetime, datetime]:
-    local = timestamp.astimezone(timezone)
-    start = _local_midnight(local.date().replace(day=1), timezone)
-    if local.month == 12:
-        end_date = date(local.year + 1, 1, 1)
-    else:
-        end_date = date(local.year, local.month + 1, 1)
-    return start, _local_midnight(end_date, timezone)
-
-
-def _local_midnight(value: date, timezone: ZoneInfo) -> datetime:
-    return datetime.combine(value, time.min, tzinfo=timezone)
-
-
-def _quantize_money(value: float) -> Decimal | None:
-    try:
-        amount = Decimal(str(value)).quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
-    except (InvalidOperation, ValueError):
-        return None
-    return amount if amount.is_finite() else None
-
-
-def _as_decimal(value: object) -> Decimal:
-    return Decimal(str(value)).quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
-
-
-def _money_text(value: object) -> str:
-    return format(_as_decimal(value), ".2f")
-
-
 def _budget_status(monthly_limit: Decimal, spent: Decimal) -> dict[str, str | float]:
     percent = (spent * Decimal("100") / monthly_limit).quantize(
-        Decimal("0.01"), rounding=ROUND_HALF_UP
+        MONEY_QUANTUM, rounding=ROUND_HALF_UP
     )
     return {
         "monthly_limit": _money_text(monthly_limit),

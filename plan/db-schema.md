@@ -194,6 +194,35 @@ usage                                        -- партиционирована
 INDEX (user_id, created_at)                  -- «стоимость/пользователь/день» для Grafana (6.2)
 ```
 
+## Служебные функции
+
+### `webapp_resolve_user(p_tg_user_id bigint)` — этап 9.1
+
+Назначение: после успешной серверной HMAC-проверки Telegram `initData` разрешить
+внешний `tg_user_id` во внутренний UUID до того, как webapp сможет открыть
+`user_transaction(UUID)`. Обычный SELECT роли `app` здесь fail-closed из-за RLS,
+а выдавать webapp роль `service` запрещено.
+
+Контракт:
+
+```sql
+RETURNS TABLE (user_id uuid, status text)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+```
+
+Функция выбирает ровно `users.id, users.status` по точному `tg_user_id` и не
+возвращает профиль, timezone, plan или Telegram-имя. Владелец — `migrator`.
+Миграция обязана выполнить `REVOKE ALL ... FROM PUBLIC` и выдать только
+`GRANT EXECUTE ... TO app`; роль `service` webapp не получает. Вызов разрешён в
+коде только после успешной HMAC-проверки initData. Неизвестная строка даёт пустой
+результат, а решение о 403 для статуса кроме `active` принимает webapp.
+
+Функция не меняет зафиксированное количество таблиц. Её добавление — отдельная
+обратно совместимая Alembic migration этапа 9.1; downgrade удаляет только функцию.
+
 ## Примечания для исполнителя миграции
 
 - GDPR-удаление (7.5): DELETE users каскадом закрывает всё, кроме tool_calls_log/usage (без FK) — их чистить отдельным DELETE по user_id в той же операции.

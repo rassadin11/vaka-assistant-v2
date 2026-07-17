@@ -6,19 +6,22 @@ from typing import Protocol
 
 from core.context import TaskContext
 from core.envelope import UpdateEnvelope
+from worker.reply import WorkerReply
 
 
 class Processor(Protocol):
     """Process one queued update and optionally return reply text."""
 
-    async def process(self, envelope: UpdateEnvelope) -> str | None:
+    async def process(self, envelope: UpdateEnvelope) -> str | WorkerReply | None:
         """Process an update envelope."""
 
 
 class ContextualProcessor(Protocol):
     """Inner processor that receives the onboarding-resolved task context."""
 
-    async def process(self, envelope: UpdateEnvelope, context: TaskContext) -> str | None:
+    async def process(
+        self, envelope: UpdateEnvelope, context: TaskContext
+    ) -> str | WorkerReply | None:
         """Process one active-user update."""
 
 

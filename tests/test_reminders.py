@@ -67,13 +67,8 @@ class FakeConnection:
             return "SELECT 1"
         if "SET status = 'cancelled'" in query:
             reminder_id = int(args[0])
-            kind = "agent_task" if "agent_task" in query else "reminder"
             for task in self.tasks:
-                if (
-                    task["id"] == reminder_id
-                    and task["kind"] == kind
-                    and task["status"] == "active"
-                ):
+                if task["id"] == reminder_id and task["status"] == "active":
                     task["status"] = "cancelled"
                     return "UPDATE 1"
             return "UPDATE 0"
@@ -85,6 +80,18 @@ class FakeConnection:
             task["next_run_at"] = args[1]
             return "UPDATE 1"
         raise AssertionError(f"unexpected execute: {query}")
+
+    async def fetchrow(self, query: str, *args: object) -> dict[str, Any] | None:
+        if "SELECT kind, status" in query:
+            task_id = int(args[0])
+            expected_kind = str(args[1]) if len(args) > 1 else None
+            for task in self.tasks:
+                if task["id"] == task_id and (
+                    expected_kind is None or task["kind"] == expected_kind
+                ):
+                    return {"kind": task["kind"], "status": task["status"]}
+            return None
+        raise AssertionError(f"unexpected fetchrow: {query}")
 
     async def fetchval(self, query: str, *args: object) -> object:
         if "COUNT(*)" in query:

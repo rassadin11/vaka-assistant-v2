@@ -33,7 +33,7 @@ PROJECT_SLUG = os.getenv("BOOTSTRAP_PROJECT_SLUG", "personal-assistant")
 ENV_NAME = os.getenv("BOOTSTRAP_ENV_NAME", "Development")
 ENV_SLUG = os.getenv("BOOTSTRAP_ENV_SLUG", "dev")
 SECRET_PATH = "/"
-SERVICE_NAMES = ("gateway", "worker", "scheduler")
+SERVICE_NAMES = ("gateway", "worker", "scheduler", "webapp")
 INPUT_ENV_PATH = Path(
     os.getenv("BOOTSTRAP_INPUT_ENV_PATH", r"C:\Users\Artem\.assistant\bootstrap.env")
 )
@@ -44,7 +44,8 @@ SEED_KEYS = tuple(
     key.strip()
     for key in os.getenv(
         "BOOTSTRAP_SEED_KEYS",
-        "TELEGRAM_BOT_TOKEN_PROD,TELEGRAM_BOT_TOKEN_TEST,OPENROUTER_API_KEY",
+        "TELEGRAM_BOT_TOKEN,TELEGRAM_BOT_TOKEN_PROD,TELEGRAM_BOT_TOKEN_TEST,"
+        "OPENROUTER_API_KEY,WEBAPP_SESSION_SECRET",
     ).split(",")
     if key.strip()
 )

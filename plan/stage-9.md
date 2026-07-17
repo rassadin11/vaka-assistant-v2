@@ -7,6 +7,11 @@
 - [miniapp-calendar-spec.md](miniapp-calendar-spec.md) — календарь;
 - [miniapp-finance-spec.md](miniapp-finance-spec.md) — финансы.
 
+Архитектурная подготовка и передача исполнителю:
+
+- [stage-9-architecture.md](stage-9-architecture.md) — принятые границы сервисов, auth/RLS, API, frontend, cache и deployment;
+- [stage-9-handoff.md](stage-9-handoff.md) — карта текущего репозитория, батчи реализации и e2e-матрица.
+
 Порядок реализации: 9.1 → 9.2 → 9.3 → 9.4. Экраны 9.2 и 9.3 независимы друг от друга (после 9.1 можно делать в любом порядке; при желании — параллельно в worktree).
 
 ## Ограничения и принципы (действуют на весь этап)
@@ -24,7 +29,7 @@
 Состав:
 
 1. **Сервис `webapp/`** — FastAPI-приложение (отдельный контейнер в compose dev+prod): отдаёт собранную статику фронта и JSON API под `/app/api/*`. Healthcheck `/app/healthz`, метрики `/app/metrics` (счётчики запросов, латентность, ошибки auth — стиль 6.2). Structured logging + trace_id (6.1) на каждый запрос.
-2. **Auth**: эндпоинт `POST /app/api/auth` принимает `initData` из Telegram.WebApp; валидация HMAC-SHA256 по спецификации Telegram (secret = HMAC("WebAppData", bot_token)), проверка `auth_date` (не старше 1 часа), резолв `tg_user_id → users.id` (только `status=active`; pending/rejected/banned → 403 с человекочитаемым текстом). Ответ — короткоживущий подписанный токен сессии (JWT HS256 или itsdangerous, TTL 12 ч, ключ из Infisical), внутри — `users.id` и `timezone`. Все остальные эндпоинты требуют токен (заголовок Authorization), при истечении фронт молча повторяет auth по initData.
+2. **Auth**: эндпоинт `POST /app/api/auth` принимает `initData` из Telegram.WebApp; валидация HMAC-SHA256 по спецификации Telegram (secret = HMAC("WebAppData", bot_token)), проверка `auth_date` (не старше 1 часа), резолв `tg_user_id → users.id` через узкую `SECURITY DEFINER`-функцию из `db-schema.md` без выдачи webapp роли `service` (только `status=active`; pending/rejected/banned → 403 с человекочитаемым текстом). Ответ — короткоживущий подписанный токен itsdangerous, TTL 12 ч, ключ из Infisical, внутри — только версия и `users.id`; актуальные status/timezone/plan перечитываются под RLS на каждом API-запросе. Все остальные эндпоинты требуют токен (заголовок Authorization), при истечении фронт один раз повторяет auth по initData; mutating-запрос автоматически не переигрывается. Детали — `stage-9-architecture.md`.
 3. **RLS-доступ**: webapp подключается ролью `app` через PgBouncer, каждый запрос — `user_transaction(user_id)` из `core/db.py`. Роль `service` в webapp запрещена.
 4. **Rate limit**: per-user на API (redis-cache, token bucket по образцу core/rate_limit.py, порядка 60 запросов/мин) — Mini App не должен позволить выкачивать БД в цикле.
 5. **Фронт-каркас `miniapp/`**: Vite + Preact + TypeScript, без тяжёлых UI-фреймворков. Подключение `telegram-web-app.js` (официальный скрипт Telegram — единственная внешняя загрузка), тема из `Telegram.WebApp.themeParams` (светлая/тёмная), BackButton, haptic по вкусу. Сборка — стадия node в Docker multi-stage, готовая статика копируется в образ webapp; в CI — job сборки фронта (lint + build).
@@ -47,13 +52,31 @@ DoD 9.3: владелец на живых данных видит коррект
 
 ## 9.4 Интеграция с ботом и полировка
 
-1. Кнопка меню бота на Mini App (setChatMenuButton, срабатывает и в проде через deploy-скрипт по образцу set-webhook).
-2. Inline-кнопки в ответах бота: после ответа с транзакциями/бюджетом — «Открыть финансы», после создания/просмотра напоминаний — «Открыть календарь» (deep link `startapp` на нужный экран/период).
-3. Тексты /help и welcome: упомянуть Mini App.
-4. Метрики продуктовые: открытия Mini App, использование экранов (в Grafana «Продуктовый» — SQL/prom по логам webapp).
-5. Prompt-правка НЕ нужна: инструменты LLM не меняются.
+Механизм связки бота и Mini App (контракт ответа, сопоставление инструмент→экран, тип
+кнопки, конфиг и метрика) зафиксирован в [stage-9-architecture.md](stage-9-architecture.md),
+раздел «9.4 Интеграция с ботом». Ниже — состав пункта.
 
-DoD 9.4: вход в Mini App в один тап из меню и из inline-кнопок; deep link открывает нужный экран; /help актуален.
+1. Кнопка меню бота на Mini App (`setChatMenuButton` → `MenuButtonWebApp` на `{PUBLIC_URL}/app/`),
+   отдельная идемпотентная команда gateway `set-menu-button` по образцу `set-webhook`;
+   срабатывает и в проде через deploy-скрипт.
+2. Inline-кнопки в ответах бота: после ответа, где сработал инструмент трат/бюджета —
+   «Открыть финансы», после ответа с напоминаниями — «Открыть календарь». Кнопка — Telegram
+   `web_app`-кнопка на `{PUBLIC_URL}/app/?screen=<finance|calendar>` (открывает нужный экран
+   без deep-link зависимости от BotFather). Экран — единственный параметр входа; период и любые
+   финансовые данные в URL не передаются (выбор периода остаётся внутри экрана). Сигнал «какой
+   инструмент сработал» приходит из `AgentResult` (список имён инструментов), не из промпта.
+3. Тексты /help и welcome: упомянуть Mini App (наглядные экраны календаря и трат), без обещаний
+   функций v2.
+4. Метрики продуктовые: открытие Mini App (счётчик успешной auth) и использование экранов
+   (`webapp_requests_total` по route календарь/финансы) — панели в Grafana «Продуктовый» на
+   Prometheus-датасорсе. Без user-id-лейблов.
+5. Prompt-правка НЕ нужна: инструменты LLM не меняются; текст Mini App в системный промпт агента
+   не добавляется.
+
+DoD 9.4: вход в Mini App в один тап из меню и из inline-кнопок; кнопка открывает нужный экран;
+неизвестный `screen`/`start_param` безопасно ведёт на экран по умолчанию; /help и welcome
+актуальны и не обещают v2; продуктовые метрики видны без user-id-лейблов. Живой e2e (Telegram
+Desktop + мобильный, светлая/тёмная тема) — на activation gate.
 
 ## DoD этапа
 

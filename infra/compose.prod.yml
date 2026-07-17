@@ -53,6 +53,39 @@ services:
       retries: 12
       start_period: 10s
 
+  webapp:
+    image: ${APP_IMAGE:-ghcr.io/rassadin11/vaka-assistant-v2:latest}
+    command: python -m core.secrets_entrypoint -- python -m webapp
+    restart: unless-stopped
+    mem_limit: 512m
+    env_file:
+      - ${ENV_FILE_DIR:-/etc/assistant}/webapp.env
+    environment:
+      REDIS_CACHE_URL: redis://redis-cache:6379/0
+      REDIS_QUEUE_URL: redis://redis-queue:6379/0
+      LOG_FORMAT: json
+    expose:
+      - "8001"
+    depends_on:
+      infisical:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from urllib.request import urlopen; urlopen('http://127.0.0.1:8001/app/healthz')"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
   worker:
     image: ${APP_IMAGE:-ghcr.io/rassadin11/vaka-assistant-v2:latest}
     command: python -m core.secrets_entrypoint -- python -m worker

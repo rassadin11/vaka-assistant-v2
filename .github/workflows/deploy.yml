@@ -73,17 +73,20 @@ jobs:
             }
             gateway_container=personal-assistant-prod-gateway-1
             caddy_container=personal-assistant-prod-caddy-1
+            webapp_container=personal-assistant-prod-webapp-1
             deadline=$(( $(date +%s) + 300 ))
             while [ "$(date +%s)" -lt "$deadline" ]; do
               gateway_health="$(health_status "$gateway_container")"
               caddy_health="$(health_status "$caddy_container")"
+              webapp_health="$(health_status "$webapp_container")"
               if [ "$gateway_health" = healthy ] &&
-                [ "$caddy_health" = healthy ]; then
+                [ "$caddy_health" = healthy ] &&
+                [ "$webapp_health" = healthy ]; then
                 exit 0
               fi
               sleep 5
             done
 
-            echo "Gateway or Caddy did not become healthy" \
+            echo "Gateway, Caddy, or webapp did not become healthy" \
               "within five minutes" >&2
             exit 1

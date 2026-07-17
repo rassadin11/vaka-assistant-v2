@@ -22,6 +22,7 @@ from core.usage_store import save_stt_usage
 from worker.app import SendReplyCallback
 from worker.documents import MAX_DOCUMENT_BYTES, DownloadFile, QueueRedis
 from worker.processor import ContextualProcessor
+from worker.reply import WorkerReply
 
 MAX_VOICE_DURATION_SECONDS = 300
 MAX_DAILY_VOICE_MINUTES = 10
@@ -68,7 +69,9 @@ class VoiceProcessor:
         self._logger = logger if logger is not None else LOGGER
         self._background_tasks: set[asyncio.Task[None]] = set()
 
-    async def process(self, envelope: UpdateEnvelope, context: TaskContext) -> str | None:
+    async def process(
+        self, envelope: UpdateEnvelope, context: TaskContext
+    ) -> str | WorkerReply | None:
         """Apply limits, transcribe, and pass the rewritten text envelope to the agent."""
 
         try:

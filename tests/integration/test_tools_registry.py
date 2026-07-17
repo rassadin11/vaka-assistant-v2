@@ -182,7 +182,7 @@ async def test_finance_tools_use_rls_upsert_budgets_and_moscow_day_bounds(
     user_a = uuid4()
     user_b = uuid4()
     registry = ToolRegistry(queue_redis, app_pool)
-    register_finance_tools(registry, app_pool, None)
+    register_finance_tools(registry, app_pool, None, queue_redis)
     context_a = _context(user_a, update_id=730)
     context_b = _context(user_b, update_id=740)
     await _create_user(service_pool, user_a)

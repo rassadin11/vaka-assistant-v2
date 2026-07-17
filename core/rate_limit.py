@@ -5,10 +5,13 @@ from __future__ import annotations
 import time
 from collections.abc import Awaitable
 from typing import Protocol
+from uuid import UUID
 
 DEFAULT_RATE_LIMIT_PER_MINUTE = 20
 DEFAULT_RATE_LIMIT_BURST = 5
 DEFAULT_RATE_LIMIT_WINDOW_MS = 60_000
+WEBAPP_RATE_LIMIT_PER_MINUTE = 60
+WEBAPP_RATE_LIMIT_BURST = 20
 RedisEvalArg = bytes | bytearray | memoryview | str | int | float
 
 RATE_LIMIT_SCRIPT = """
@@ -58,6 +61,12 @@ def rate_limit_key(user_id: int) -> str:
     return f"rl:user:{user_id}"
 
 
+def webapp_rate_limit_key(user_id: UUID | str) -> str:
+    """Return the isolated Mini App token-bucket key for a user UUID."""
+
+    return f"rl:webapp:{user_id}"
+
+
 async def allow_user_update(
     redis: RateLimitRedis,
     user_id: int,
@@ -68,6 +77,48 @@ async def allow_user_update(
     now_ms: int | None = None,
 ) -> bool:
     """Atomically consume one token from a user's Redis token bucket."""
+
+    return await allow_token_bucket(
+        redis,
+        rate_limit_key(user_id),
+        per_minute=per_minute,
+        burst=burst,
+        refill_window_ms=refill_window_ms,
+        now_ms=now_ms,
+    )
+
+
+async def allow_webapp_request(
+    redis: RateLimitRedis,
+    user_id: UUID,
+    *,
+    per_minute: int = WEBAPP_RATE_LIMIT_PER_MINUTE,
+    burst: int = WEBAPP_RATE_LIMIT_BURST,
+    refill_window_ms: int = DEFAULT_RATE_LIMIT_WINDOW_MS,
+    now_ms: int | None = None,
+) -> bool:
+    """Atomically consume one Mini App API token from a separate bucket."""
+
+    return await allow_token_bucket(
+        redis,
+        webapp_rate_limit_key(user_id),
+        per_minute=per_minute,
+        burst=burst,
+        refill_window_ms=refill_window_ms,
+        now_ms=now_ms,
+    )
+
+
+async def allow_token_bucket(
+    redis: RateLimitRedis,
+    key: str,
+    *,
+    per_minute: int,
+    burst: int,
+    refill_window_ms: int = DEFAULT_RATE_LIMIT_WINDOW_MS,
+    now_ms: int | None = None,
+) -> bool:
+    """Atomically consume one token from an explicitly namespaced Redis bucket."""
 
     if per_minute <= 0:
         raise ValueError("per_minute must be positive.")
@@ -82,7 +133,7 @@ async def allow_user_update(
     result = await redis.eval(
         RATE_LIMIT_SCRIPT,
         1,
-        rate_limit_key(user_id),
+        key,
         current_ms,
         burst,
         per_minute,

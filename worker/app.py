@@ -39,8 +39,10 @@ from core.queue import (
 )
 from core.tracing import reset_trace_id, set_trace_id
 from worker.processor import Processor
+from worker.reply import MiniAppButton, WorkerReply
 
 SendReplyCallback = Callable[[int, str], Awaitable[None]]
+SendReplyWithButtonCallback = Callable[[int, str, MiniAppButton], Awaitable[None]]
 SendTypingCallback = Callable[[int], Awaitable[None]]
 NotifyAdminCallback = Callable[[str], Awaitable[None]]
 
@@ -110,6 +112,7 @@ class Worker:
         send_reply: SendReplyCallback,
         send_typing: SendTypingCallback,
         notify_admin: NotifyAdminCallback,
+        send_reply_with_button: SendReplyWithButtonCallback | None = None,
         config: WorkerConfig | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -117,6 +120,7 @@ class Worker:
         self._cache_redis = cache_redis
         self._processor = processor
         self._send_reply = send_reply
+        self._send_reply_with_button = send_reply_with_button
         self._send_typing = send_typing
         self._notify_admin = notify_admin
         self._config = config if config is not None else WorkerConfig()
@@ -287,9 +291,9 @@ class Worker:
 
             will_retry = True
             started_at = time.monotonic()
-            reply_text = await self._process_with_typing(envelope)
-            if reply_text is not None:
-                await self._send_reply(envelope.chat_id, reply_text)
+            reply = await self._process_with_typing(envelope)
+            if reply is not None:
+                await self._deliver_reply(envelope.chat_id, reply)
             await self._cache_redis.set(dedup_key, "1", ex=WORKER_DEDUP_TTL_SECONDS, nx=True)
             await ack(self._queue_redis, message.queue, message.stream, message.entry_id)
             await self._cache_redis.delete(attempt_key)
@@ -364,7 +368,17 @@ class Worker:
             await asyncio.sleep(self._config.stream_order_retry_sleep_seconds)
         return False
 
-    async def _process_with_typing(self, envelope: UpdateEnvelope) -> str | None:
+    async def _deliver_reply(self, chat_id: int, reply: str | WorkerReply) -> None:
+        if isinstance(reply, WorkerReply):
+            text, button = reply.text, reply.mini_app_button
+        else:
+            text, button = reply, None
+        if button is not None and self._send_reply_with_button is not None:
+            await self._send_reply_with_button(chat_id, text, button)
+        else:
+            await self._send_reply(chat_id, text)
+
+    async def _process_with_typing(self, envelope: UpdateEnvelope) -> str | WorkerReply | None:
         await self._send_typing(envelope.chat_id)
         typing_task = asyncio.create_task(self._typing_loop(envelope.chat_id))
         lock_extension_task = asyncio.create_task(self._lock_extension_loop(envelope.user_id))

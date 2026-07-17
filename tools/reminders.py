@@ -11,10 +11,16 @@ from pydantic import BaseModel, ConfigDict
 
 from core.context import TaskContext
 from core.db import user_transaction
+from core.reminders_service import (
+    ActiveReminderLimitReached,
+    ReminderTimeInPast,
+    ScheduledTaskNotFound,
+    ScheduledTaskStateConflict,
+    cancel_scheduled_task,
+    create_reminder,
+    cron_for_repeat,
+)
 from core.tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
-
-MAX_ACTIVE_REMINDERS = 25
-TITLE_MAX_LENGTH = 80
 
 
 class CreateReminderArgs(BaseModel):
@@ -99,44 +105,32 @@ async def _create_reminder(
         )
 
     now = datetime.now(UTC)
-    if remind_at <= now:
-        local_now = now.astimezone(timezone).isoformat()
-        return ToolResult(
-            status="error",
-            error=(
-                f"Время напоминания должно быть в будущем. Сейчас по вашему времени: {local_now}."
-            ),
-            retryable=True,
-        )
-
     cron_expr = _cron_for_repeat(args.repeat, remind_at.astimezone(timezone))
     async with user_transaction(pool, ctx.user_id) as connection:
-        active_count = await connection.fetchval(
-            """
-            SELECT COUNT(*)
-            FROM scheduled_tasks
-            WHERE kind = 'reminder' AND status = 'active'
-            """
-        )
-        if int(active_count or 0) >= MAX_ACTIVE_REMINDERS:
+        try:
+            reminder_id = await create_reminder(
+                connection,
+                ctx.user_id,
+                args.text,
+                remind_at.astimezone(UTC),
+                cron_expr=cron_expr,
+                now=now,
+            )
+        except ReminderTimeInPast:
+            local_now = now.astimezone(timezone).isoformat()
+            return ToolResult(
+                status="error",
+                error=(
+                    "Время напоминания должно быть в будущем. "
+                    f"Сейчас по вашему времени: {local_now}."
+                ),
+                retryable=True,
+            )
+        except ActiveReminderLimitReached:
             return ToolResult(
                 status="error",
                 error="Достигнут лимит: одновременно можно иметь не более 25 активных напоминаний.",
             )
-        reminder_id = await connection.fetchval(
-            """
-            INSERT INTO scheduled_tasks (
-                user_id, kind, title, payload, cron_expr, next_run_at, status, created_at
-            )
-            VALUES ($1, 'reminder', $2, $3, $4, $5, 'active', now())
-            RETURNING id
-            """,
-            ctx.user_id,
-            args.text[:TITLE_MAX_LENGTH],
-            args.text,
-            cron_expr,
-            remind_at.astimezone(UTC),
-        )
     return ToolResult(
         status="ok",
         payload={
@@ -178,16 +172,10 @@ async def _cancel_reminder(
     args: CancelReminderArgs,
 ) -> ToolResult:
     async with user_transaction(pool, ctx.user_id) as connection:
-        result = await connection.execute(
-            """
-            UPDATE scheduled_tasks
-            SET status = 'cancelled'
-            WHERE id = $1 AND kind = 'reminder' AND status = 'active'
-            """,
-            args.reminder_id,
-        )
-    if result == "UPDATE 0":
-        return ToolResult(status="error", error="Активное напоминание не найдено.")
+        try:
+            await cancel_scheduled_task(connection, args.reminder_id, kind="reminder")
+        except (ScheduledTaskNotFound, ScheduledTaskStateConflict):
+            return ToolResult(status="error", error="Активное напоминание не найдено.")
     return ToolResult(status="ok", payload={"id": args.reminder_id, "status": "cancelled"})
 
 
@@ -199,17 +187,7 @@ def _parse_remind_at(value: str, timezone: ZoneInfo) -> datetime:
 
 
 def _cron_for_repeat(repeat: str, local_remind_at: datetime) -> str | None:
-    minute = local_remind_at.minute
-    hour = local_remind_at.hour
-    if repeat == "none":
-        return None
-    if repeat == "daily":
-        return f"{minute} {hour} * * *"
-    if repeat == "weekly":
-        return f"{minute} {hour} * * {(local_remind_at.weekday() + 1) % 7}"
-    if repeat == "monthly":
-        return f"{minute} {hour} {local_remind_at.day} * *"
-    raise ValueError(f"unsupported reminder repeat: {repeat}")
+    return cron_for_repeat(repeat, local_remind_at)
 
 
 def _repeat_for_cron(cron_expr: str | None) -> str:

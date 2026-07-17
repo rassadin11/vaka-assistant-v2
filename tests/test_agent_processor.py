@@ -26,6 +26,7 @@ from worker.agent_processor import (
     SOFT_REFUSE_TEXT,
     AgentProcessor,
 )
+from worker.reply import WorkerReply
 
 
 def _context() -> TaskContext:
@@ -298,6 +299,58 @@ async def test_end_of_task_persists_user_tool_round_and_final_answer_once(
     assert drafts[2].content == "tool result"
     assert drafts[3].content == "final answer"
     assert drafts[3].meta == {"prompt_version": "v1", "stop_reason": "answer"}
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "envelope", "expected_screen"),
+    [
+        ("query_transactions", _envelope(), "finance"),
+        ("create_reminder", _envelope(), "calendar"),
+        ("neutral_tool", _envelope(), None),
+        ("query_transactions", _agent_task_envelope(), None),
+    ],
+)
+async def test_mini_app_button_is_only_added_to_relevant_interactive_answers(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    envelope: UpdateEnvelope,
+    expected_screen: str | None,
+) -> None:
+    async def fake_load(*_args: object) -> DialogHistory:
+        return DialogHistory(summary=None, tail=[])
+
+    async def fake_save(*_args: object) -> list[UUID]:
+        return []
+
+    async def tool_handler(_context: TaskContext) -> str:
+        return "tool result"
+
+    monkeypatch.setattr("worker.agent_processor.load_dialog", fake_load)
+    monkeypatch.setattr("worker.agent_processor.save_messages", fake_save)
+    monkeypatch.setattr("worker.agent_processor.save_usage", _save_usage)
+    provider = MockLLMProvider.scripted(
+        [mock_tool_call_response(tool_name, "{}"), mock_text_response("final answer")]
+    )
+    processor = AgentProcessor(
+        provider,
+        StaticToolDispatcher(
+            [ToolDefinition(name=tool_name, description="test tool", parameters={})],
+            {tool_name: tool_handler},
+        ),
+        AgentLoopConfig(),
+        app_pool=object(),  # type: ignore[arg-type]
+        send=_send,
+    )
+
+    result = await processor.process(envelope, _context())
+
+    if expected_screen is None:
+        assert isinstance(result, str)
+    else:
+        assert isinstance(result, WorkerReply)
+        assert result.text == "final answer"
+        assert result.mini_app_button is not None
+        assert result.mini_app_button.screen == expected_screen
 
 
 async def test_trimmed_history_is_summarized_to_its_last_stored_id(

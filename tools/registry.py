@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import asyncpg
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.context import TaskContext
 from core.embeddings import EmbeddingsProvider
+from core.finance_summary import FinanceSummaryRedis
 from core.tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
 from tools.clock import get_current_time
 from tools.documents import register_document_tools
@@ -61,7 +64,12 @@ def register_builtin_tools(
         )
     )
     if app_pool is not None:
-        register_finance_tools(registry, app_pool, send_photo)
+        register_finance_tools(
+            registry,
+            app_pool,
+            send_photo,
+            cast(FinanceSummaryRedis, cache_redis),
+        )
         register_reminder_tools(registry, app_pool)
         register_scheduled_task_tools(registry, app_pool)
         register_document_tools(registry, app_pool, embeddings)

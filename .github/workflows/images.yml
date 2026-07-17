@@ -52,7 +52,7 @@ jobs:
       - name: Smoke test image
         run: |
           docker pull ghcr.io/rassadin11/vaka-assistant-v2:sha-${{ github.sha }}
-          docker run --rm ghcr.io/rassadin11/vaka-assistant-v2:sha-${{ github.sha }} python -c "import gateway, worker, core, tools"
+          docker run --rm ghcr.io/rassadin11/vaka-assistant-v2:sha-${{ github.sha }} python -c "import gateway, worker, core, tools, webapp"
 
   postgres:
     needs: changes
