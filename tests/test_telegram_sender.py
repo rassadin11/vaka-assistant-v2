@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import BufferedInputFile
 
 from core.telegram_sender import MAX_TELEGRAM_DOWNLOAD_BYTES, SendRateLimiter, TelegramSender
@@ -29,6 +29,7 @@ class FakeClock:
 class FakeBot:
     def __init__(self) -> None:
         self.messages: list[tuple[int, str, object | None]] = []
+        self.message_kwargs: list[dict[str, Any]] = []
         self.actions: list[tuple[int, str]] = []
         self.callback_answers: list[str] = []
         self.message_outcomes: list[object] = []
@@ -41,9 +42,10 @@ class FakeBot:
         self,
         chat_id: int,
         text: str,
-        reply_markup: object | None = None,
+        **kwargs: Any,
     ) -> object:
-        self.messages.append((chat_id, text, reply_markup))
+        self.messages.append((chat_id, text, kwargs.get("reply_markup")))
+        self.message_kwargs.append(kwargs)
         if self.message_outcomes:
             outcome = self.message_outcomes.pop(0)
             if isinstance(outcome, BaseException):
@@ -118,6 +120,7 @@ async def test_sender_retries_telegram_429_retry_after() -> None:
     await sender.send_message(42, "hello")
 
     assert [text for _, text, _markup in bot.messages] == ["hello", "hello"]
+    assert [kwargs["parse_mode"] for kwargs in bot.message_kwargs] == ["HTML", "HTML"]
     assert clock.sleeps == [2.0]
 
 
@@ -151,6 +154,7 @@ async def test_sender_splits_long_messages() -> None:
     await sender.send_message(42, text)
 
     assert bot.messages == [(42, "a" * 4096, None), (42, "b" * 10, None)]
+    assert [kwargs["parse_mode"] for kwargs in bot.message_kwargs] == ["HTML", "HTML"]
     assert clock.sleeps == [1.0]
 
 
@@ -165,6 +169,32 @@ async def test_sender_applies_reply_markup_to_last_chunk_only() -> None:
     await sender.send_message(42, text, reply_markup=markup)
 
     assert bot.messages == [(42, "a" * 4096, None), (42, "b" * 10, markup)]
+    assert [kwargs["parse_mode"] for kwargs in bot.message_kwargs] == ["HTML", "HTML"]
+
+
+async def test_sender_falls_back_to_plain_text_after_html_parse_error() -> None:
+    bot = FakeBot()
+    bot.message_outcomes = [
+        TelegramBadRequest(method=cast(Any, None), message="can't parse entities"),
+        object(),
+    ]
+    sender = TelegramSender(bot)
+
+    await sender.send_message(42, "**bold**")
+
+    assert bot.messages == [(42, "<b>bold</b>", None), (42, "**bold**", None)]
+    assert bot.message_kwargs[0]["parse_mode"] == "HTML"
+    assert "parse_mode" not in bot.message_kwargs[1]
+
+
+async def test_admin_notifications_remain_plain_text() -> None:
+    bot = FakeBot()
+    sender = TelegramSender(bot, admin_chat_ids=[99])
+
+    await sender.notify_admins("<trace> **alert**")
+
+    assert bot.messages == [(99, "<trace> **alert**", None)]
+    assert "parse_mode" not in bot.message_kwargs[0]
 
 
 async def test_sender_answers_callback_with_global_pacing_only() -> None:

@@ -461,7 +461,7 @@ _REFUSAL_WORDINGS: tuple[str, ...] = (
     "нет доступа",
     "не умею",
     "недоступн",
-    "нет возможности",
+    "нет возможност",
 )
 
 
@@ -609,6 +609,65 @@ def build_scenarios(prompt_version: str = "v1") -> list[Scenario]:
                 _no_tool(required_any=("подтвер",), forbidden=("отправил", "отправлено")),
             ),
             Scenario(
+                "transaction-no-confirm",
+                "Record a stated past expense immediately without asking for confirmation.",
+                _messages(
+                    LLMMessage(role="user", content="вчера потратил 201 рубль на фастфуд"),
+                    system_message=system_message,
+                ),
+                _tools("add_transaction"),
+                _tool_check(
+                    "add_transaction",
+                    amount=201,
+                    direction="expense",
+                    category="food",
+                    contains={"ts": "2026-07-08"},
+                ),
+            ),
+            Scenario(
+                "date-next-event",
+                "Pick the next upcoming event relative to Current time from web results.",
+                [
+                    system_message,
+                    LLMMessage(role="user", content="Когда ближайшая гонка Формулы-1?"),
+                    LLMMessage(
+                        role="assistant",
+                        tool_calls=[
+                            LLMToolCall(
+                                id="search-1",
+                                name="web_search",
+                                arguments_json='{"query":"календарь Формулы-1 2026"}',
+                            )
+                        ],
+                    ),
+                    LLMMessage(
+                        role="tool",
+                        tool_call_id="search-1",
+                        content=(
+                            '{"status":"ok","payload":{"results":[{"title":"Календарь Формулы-1 '
+                            '2026","snippet":"Гран-при Австрии — 28 июня 2026; Гран-при '
+                            "Великобритании — 5 июля 2026; Гран-при Бельгии — 26 июля 2026; "
+                            'Гран-при Нидерландов — 23 августа 2026"}]}}'
+                        ),
+                    ),
+                ],
+                _tools("web_search"),
+                _no_tool(
+                    required_any=("бельги",),
+                    forbidden=("какая сегодня дата", "уточните дату"),
+                ),
+            ),
+            Scenario(
+                "identity-no-fabrication",
+                "Do not name a specific vendor model when asked what model it runs on.",
+                _messages(
+                    LLMMessage(role="user", content="Какую модель нейросети ты используешь?"),
+                    system_message=system_message,
+                ),
+                _tools("web_search"),
+                _no_tool(forbidden=("gpt", "chatgpt", "openai", "claude", "gemini", "deepseek")),
+            ),
+            Scenario(
                 "pending-modify-request",
                 "Do not call the tool again on a modification request during pending.",
                 [
@@ -624,8 +683,8 @@ def build_scenarios(prompt_version: str = "v1") -> list[Scenario]:
             ),
         ]
     )
-    if len(scenarios) != 30:
-        raise RuntimeError("Prompt evaluation suite must contain exactly 30 scenarios.")
+    if len(scenarios) != 33:
+        raise RuntimeError("Prompt evaluation suite must contain exactly 33 scenarios.")
     return scenarios
 
 

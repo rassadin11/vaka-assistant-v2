@@ -21,6 +21,12 @@ class Metrics:
             ["kind"],
             registry=registry,
         )
+        self.updates_ignored = Counter(
+            "updates_ignored_total",
+            "Telegram updates ignored by the gateway parser",
+            ["reason"],
+            registry=registry,
+        )
         self.updates_enqueued = Counter(
             "updates_enqueued_total",
             "Telegram updates put onto a worker queue.",

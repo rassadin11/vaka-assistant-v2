@@ -185,9 +185,10 @@ async def _add_transaction(
             """
             SELECT COALESCE(SUM(amount), 0)
             FROM transactions
-            WHERE category = $1 AND ts >= $2 AND ts < $3
+            WHERE category = $1 AND direction = $2 AND ts >= $3 AND ts < $4
             """,
             category,
+            args.direction,
             day_start,
             day_end,
         )

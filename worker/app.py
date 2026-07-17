@@ -47,6 +47,10 @@ NotifyAdminCallback = Callable[[str], Awaitable[None]]
 LOGGER = logging.getLogger(__name__)
 WORKER_DEDUP_TTL_SECONDS = 86_400
 WORKER_ATTEMPT_TTL_SECONDS = 86_400
+RETRY_NOTICE_TTL_SECONDS = 3_600
+RETRY_NOTICE_TEXT = (
+    "Обработка сообщения заняла больше времени, чем обычно. Уже разбираюсь — отвечу чуть позже."
+)
 
 
 class CacheRedis(Protocol):
@@ -241,6 +245,7 @@ class Worker:
             return
 
         started_at: float | None = None
+        will_retry = False
         try:
             current_delivery_count = await self._message_delivery_count(message)
             envelope = envelope.model_copy(update={"attempt": current_delivery_count})
@@ -280,6 +285,7 @@ class Worker:
                 self._logger.warning("message moved to dlq", extra=log_extra)
                 return
 
+            will_retry = True
             started_at = time.monotonic()
             reply_text = await self._process_with_typing(envelope)
             if reply_text is not None:
@@ -292,6 +298,8 @@ class Worker:
         except TimeoutError:
             _record_task_result(message.queue, "error", _task_elapsed(started_at))
             self._logger.exception("message processing timed out", extra=log_extra)
+            if will_retry:
+                await self._send_retry_notice(envelope, log_extra)
         except RedisConnectionError:
             _record_task_result(message.queue, "error", _task_elapsed(started_at))
             self._logger.exception(
@@ -302,12 +310,33 @@ class Worker:
         except Exception:
             _record_task_result(message.queue, "error", _task_elapsed(started_at))
             self._logger.exception("message processing failed", extra=log_extra)
+            if will_retry:
+                await self._send_retry_notice(envelope, log_extra)
         finally:
             await release_user_lock(
                 self._queue_redis,
                 envelope.user_id,
                 self._config.worker_token,
             )
+
+    async def _send_retry_notice(
+        self,
+        envelope: UpdateEnvelope,
+        log_extra: dict[str, str],
+    ) -> None:
+        """Claim and send the one-time retry notice without affecting retries."""
+
+        try:
+            claimed = await self._cache_redis.set(
+                f"retry_notice:{envelope.update_id}",
+                "1",
+                ex=RETRY_NOTICE_TTL_SECONDS,
+                nx=True,
+            )
+            if bool(claimed):
+                await self._send_reply(envelope.chat_id, RETRY_NOTICE_TEXT)
+        except Exception:
+            self._logger.warning("failed to send retry notice", exc_info=True, extra=log_extra)
 
     async def _message_delivery_count(self, message: QueueMessage) -> int:
         if message.delivery_count > 1:

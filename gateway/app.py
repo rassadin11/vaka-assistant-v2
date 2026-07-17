@@ -7,6 +7,7 @@ import hmac
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 from aiogram import Bot
@@ -32,6 +33,9 @@ DEDUP_TTL_SECONDS = 86_400
 RATE_LIMIT_WARNING_TTL_SECONDS = 60
 RATE_LIMIT_WARNING_TEXT = (
     "Слишком много сообщений — сделайте небольшую паузу, я отвечу на уже отправленные."
+)
+UNSUPPORTED_MESSAGE_TEXT = (
+    "Пока я понимаю текстовые сообщения, голосовые и PDF-файлы. Другие форматы прочитать не могу."
 )
 
 logger = logging.getLogger(__name__)
@@ -90,6 +94,15 @@ EnqueueFunc = Callable[[Any, QueueName, UpdateEnvelope], Awaitable[str]]
 SendUserMessage = Callable[[int, str], Awaitable[None]]
 
 
+@dataclass(frozen=True, slots=True)
+class UnsupportedPrivateMessage:
+    """A private message whose kind the gateway does not support yet."""
+
+    update_id: int
+    user_id: int
+    chat_id: int
+
+
 async def handle_update(
     update_dict: Mapping[str, Any],
     *,
@@ -102,9 +115,18 @@ async def handle_update(
 ) -> None:
     """Process a Telegram update through the shared webhook/polling path."""
 
-    envelope = _envelope_from_update(update_dict)
-    if envelope is None:
+    parsed_update = _envelope_from_update(update_dict)
+    if parsed_update is None:
         return
+    if isinstance(parsed_update, UnsupportedPrivateMessage):
+        await _handle_unsupported_private_message(
+            parsed_update,
+            cache_redis=cache_redis,
+            send_user_message=send_user_message,
+        )
+        return
+
+    envelope = parsed_update
     active_metrics().updates_received.labels(kind=envelope.kind).inc()
 
     token = set_trace_id(str(envelope.trace_id))
@@ -160,6 +182,42 @@ async def _handle_envelope(
     await enqueue_func(queue_redis, queue, envelope)
     active_metrics().updates_enqueued.labels(queue=queue).inc()
     await cache_redis.set(dedup_key, "1", nx=True, ex=DEDUP_TTL_SECONDS)
+
+
+async def _handle_unsupported_private_message(
+    message: UnsupportedPrivateMessage,
+    *,
+    cache_redis: CacheRedis,
+    send_user_message: SendUserMessage | None,
+) -> None:
+    """Deduplicate and acknowledge an unsupported private message with a stub."""
+
+    dedup_key = f"dedup:{message.update_id}"
+    if await cache_redis.exists(dedup_key):
+        active_metrics().updates_dedup_skipped.inc()
+        logger.debug("duplicate update ignored", extra={"update_id": message.update_id})
+        return
+
+    claimed = await cache_redis.set(dedup_key, "1", nx=True, ex=DEDUP_TTL_SECONDS)
+    if not bool(claimed):
+        active_metrics().updates_dedup_skipped.inc()
+        logger.debug("duplicate update ignored", extra={"update_id": message.update_id})
+        return
+
+    if send_user_message is None:
+        logger.info(
+            "unsupported message stub skipped because Telegram sender is unavailable",
+            extra={"update_id": message.update_id, "user_id": message.user_id},
+        )
+        return
+    try:
+        await send_user_message(message.chat_id, UNSUPPORTED_MESSAGE_TEXT)
+    except Exception:
+        logger.warning(
+            "failed to send unsupported message stub",
+            exc_info=True,
+            extra={"update_id": message.update_id, "chat_id": message.chat_id},
+        )
 
 
 def create_app(
@@ -327,10 +385,13 @@ def _webhook_auth_ok(
     )
 
 
-def _envelope_from_update(update_dict: Mapping[str, Any]) -> UpdateEnvelope | None:
+def _envelope_from_update(
+    update_dict: Mapping[str, Any],
+) -> UpdateEnvelope | UnsupportedPrivateMessage | None:
     update_id = update_dict.get("update_id")
     if not isinstance(update_id, int):
         logger.debug("update without integer update_id ignored")
+        active_metrics().updates_ignored.labels(reason="missing_ids").inc()
         return None
 
     message = update_dict.get("message")
@@ -341,14 +402,22 @@ def _envelope_from_update(update_dict: Mapping[str, Any]) -> UpdateEnvelope | No
     if isinstance(callback_query, Mapping):
         return _callback_envelope(update_id, callback_query)
 
-    logger.debug("unsupported update kind ignored", extra={"update_id": update_id})
+    logger.warning(
+        "unsupported update kind ignored",
+        extra={"update_id": update_id, "update_keys": sorted(update_dict)},
+    )
+    active_metrics().updates_ignored.labels(reason="unsupported_update").inc()
     return None
 
 
-def _message_envelope(update_id: int, message: Mapping[str, Any]) -> UpdateEnvelope | None:
+def _message_envelope(
+    update_id: int,
+    message: Mapping[str, Any],
+) -> UpdateEnvelope | UnsupportedPrivateMessage | None:
     chat = message.get("chat")
     if not isinstance(chat, Mapping) or chat.get("type") != "private":
         logger.debug("non-private message ignored", extra={"update_id": update_id})
+        active_metrics().updates_ignored.labels(reason="non_private").inc()
         return None
 
     user = message.get("from")
@@ -356,6 +425,7 @@ def _message_envelope(update_id: int, message: Mapping[str, Any]) -> UpdateEnvel
     chat_id = _int_field(chat, "id")
     if user_id is None or chat_id is None:
         logger.debug("message without user/chat id ignored", extra={"update_id": update_id})
+        active_metrics().updates_ignored.labels(reason="missing_ids").inc()
         return None
 
     text = message.get("text")
@@ -372,6 +442,7 @@ def _message_envelope(update_id: int, message: Mapping[str, Any]) -> UpdateEnvel
     if isinstance(voice, Mapping):
         payload = _file_payload(voice)
         if payload is None:
+            active_metrics().updates_ignored.labels(reason="missing_file_id").inc()
             return None
         duration = voice.get("duration")
         if isinstance(duration, int):
@@ -388,6 +459,7 @@ def _message_envelope(update_id: int, message: Mapping[str, Any]) -> UpdateEnvel
     if isinstance(document, Mapping):
         payload = _file_payload(document)
         if payload is None:
+            active_metrics().updates_ignored.labels(reason="missing_file_id").inc()
             return None
         file_name = document.get("file_name")
         mime_type = document.get("mime_type")
@@ -395,6 +467,9 @@ def _message_envelope(update_id: int, message: Mapping[str, Any]) -> UpdateEnvel
             payload["file_name"] = file_name
         if isinstance(mime_type, str):
             payload["mime_type"] = mime_type
+        caption = message.get("caption")
+        if isinstance(caption, str):
+            payload["caption"] = caption
         return UpdateEnvelope(
             update_id=update_id,
             user_id=user_id,
@@ -403,8 +478,33 @@ def _message_envelope(update_id: int, message: Mapping[str, Any]) -> UpdateEnvel
             payload=payload,
         )
 
-    logger.debug("unsupported message kind ignored", extra={"update_id": update_id})
-    return None
+    photos = message.get("photo")
+    if isinstance(photos, list) and photos:
+        largest = photos[-1]
+        if not isinstance(largest, Mapping):
+            active_metrics().updates_ignored.labels(reason="missing_file_id").inc()
+            return None
+        payload = _file_payload(largest)
+        if payload is None:
+            active_metrics().updates_ignored.labels(reason="missing_file_id").inc()
+            return None
+        caption = message.get("caption")
+        if isinstance(caption, str):
+            payload["caption"] = caption
+        return UpdateEnvelope(
+            update_id=update_id,
+            user_id=user_id,
+            chat_id=chat_id,
+            kind="photo",
+            payload=payload,
+        )
+
+    logger.warning(
+        "unsupported message kind ignored",
+        extra={"update_id": update_id, "message_keys": sorted(message)},
+    )
+    active_metrics().updates_ignored.labels(reason="unsupported_message").inc()
+    return UnsupportedPrivateMessage(update_id=update_id, user_id=user_id, chat_id=chat_id)
 
 
 def _callback_envelope(
@@ -414,11 +514,13 @@ def _callback_envelope(
     message = callback_query.get("message")
     if not isinstance(message, Mapping):
         logger.debug("callback without chat message ignored", extra={"update_id": update_id})
+        active_metrics().updates_ignored.labels(reason="callback_no_message").inc()
         return None
 
     chat = message.get("chat")
     if not isinstance(chat, Mapping) or chat.get("type") != "private":
         logger.debug("non-private callback ignored", extra={"update_id": update_id})
+        active_metrics().updates_ignored.labels(reason="non_private").inc()
         return None
 
     user = callback_query.get("from")
@@ -435,6 +537,7 @@ def _callback_envelope(
         or not isinstance(data, str)
     ):
         logger.debug("callback without required fields ignored", extra={"update_id": update_id})
+        active_metrics().updates_ignored.labels(reason="missing_ids").inc()
         return None
 
     return UpdateEnvelope(

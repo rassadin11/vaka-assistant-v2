@@ -71,8 +71,12 @@ class FakeConnection:
     async def fetchval(self, query: str, *args: object) -> Decimal | None:
         if "FROM budgets" in query:
             return self.budgets.get(str(args[0]))
-        category, start, end = str(args[0]), args[1], args[2]
-        direction = "expense" if "direction = 'expense'" in query else None
+        category = str(args[0])
+        if "direction = $2" in query:
+            direction, start, end = str(args[1]), args[2], args[3]
+        else:
+            start, end = args[1], args[2]
+            direction = "expense" if "direction = 'expense'" in query else None
         return sum(
             (
                 row["amount"]
@@ -189,6 +193,23 @@ async def test_add_transaction_rejects_non_positive_and_far_future_values() -> N
     assert future.status == "error"
     assert future.retryable is False
     assert pool.connection.transactions == []
+
+
+async def test_add_transaction_today_total_filters_by_direction() -> None:
+    pool = FakePool()
+    income = await _add_transaction(
+        pool, _context(), AddTransactionArgs(amount=100, direction="income", category="food")
+    )
+    expense = await _add_transaction(
+        pool, _context(), AddTransactionArgs(amount=20, direction="expense", category="food")
+    )
+    later_income = await _add_transaction(
+        pool, _context(), AddTransactionArgs(amount=15, direction="income", category="food")
+    )
+
+    assert income.payload["today_total"] == "100.00"
+    assert expense.payload["today_total"] == "20.00"
+    assert later_income.payload["today_total"] == "115.00"
 
 
 async def test_query_validates_period_and_aggregates_category_day_and_none() -> None:

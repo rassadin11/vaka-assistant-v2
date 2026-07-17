@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Buffer, Callable, Sequence
 from io import BytesIO
 from typing import Protocol
 
-from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import (
     BufferedInputFile,
     ForceReply,
@@ -17,6 +17,8 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
+
+from core.telegram_format import markdown_to_telegram_html
 
 MAX_TELEGRAM_MESSAGE_CHARS = 4096
 MAX_TELEGRAM_DOWNLOAD_BYTES = 20 * 1024 * 1024
@@ -37,6 +39,7 @@ class TelegramBot(Protocol):
         text: str,
         *,
         reply_markup: TelegramReplyMarkup | None = None,
+        parse_mode: str | None = None,
     ) -> Awaitable[object]:
         """Send a text message."""
         ...
@@ -144,10 +147,27 @@ class TelegramSender:
     ) -> None:
         """Send a text message, splitting long text into Telegram-sized chunks."""
 
+        await self._send_text(chat_id, text, reply_markup=reply_markup, format_as_html=True)
+
+    async def _send_text(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        reply_markup: TelegramReplyMarkup | None = None,
+        format_as_html: bool,
+    ) -> None:
+        """Send split text, optionally formatting each raw chunk as Telegram HTML."""
+
         chunks = split_telegram_text(text)
         for index, chunk in enumerate(chunks):
             chunk_markup = reply_markup if index == len(chunks) - 1 else None
-            await self._send_message_chunk(chat_id, chunk, reply_markup=chunk_markup)
+            await self._send_message_chunk(
+                chat_id,
+                chunk,
+                reply_markup=chunk_markup,
+                format_as_html=format_as_html,
+            )
 
     async def send_photo(self, chat_id: int, photo: bytes, caption: str | None = None) -> None:
         """Send a PNG photo using the same pacing and 429 retry policy as messages."""
@@ -209,7 +229,7 @@ class TelegramSender:
 
         for chat_id in self._admin_chat_ids:
             try:
-                await self.send_message(chat_id, text)
+                await self._send_text(chat_id, text, format_as_html=False)
             except TelegramAPIError as exc:
                 self._logger.warning("telegram admin notification failed: %s", exc)
 
@@ -219,16 +239,27 @@ class TelegramSender:
         text: str,
         *,
         reply_markup: TelegramReplyMarkup | None = None,
+        format_as_html: bool,
     ) -> None:
         retries = 0
+        outgoing_text = markdown_to_telegram_html(text) if format_as_html else text
+        use_html = format_as_html
         while True:
             await self._limiter.wait(chat_id=chat_id, apply_per_chat=True)
             try:
-                await self._bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    reply_markup=reply_markup,
-                )
+                if use_html:
+                    await self._bot.send_message(
+                        chat_id=chat_id,
+                        text=outgoing_text,
+                        reply_markup=reply_markup,
+                        parse_mode="HTML",
+                    )
+                else:
+                    await self._bot.send_message(
+                        chat_id=chat_id,
+                        text=outgoing_text,
+                        reply_markup=reply_markup,
+                    )
                 return
             except TelegramRetryAfter as exc:
                 retries += 1
@@ -236,6 +267,18 @@ class TelegramSender:
                     self._logger.warning("telegram retry limit exceeded: %s", exc)
                     raise
                 await self._sleep(float(exc.retry_after))
+            except TelegramBadRequest as exc:
+                # Conversion can both break entity parsing and inflate the chunk
+                # past the length limit, so any HTML-mode rejection retries plain.
+                if use_html:
+                    self._logger.warning(
+                        "telegram HTML send rejected; resending plain text: %s", exc
+                    )
+                    outgoing_text = text
+                    use_html = False
+                    continue
+                self._logger.warning("telegram message send failed: %s", exc)
+                raise
             except TelegramAPIError as exc:
                 self._logger.warning("telegram message send failed: %s", exc)
                 raise

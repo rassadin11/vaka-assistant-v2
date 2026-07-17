@@ -95,6 +95,27 @@ async def test_gateway_increments_update_metrics(metric_registry: CollectorRegis
     assert 'updates_enqueued_total{queue="interactive"} 1.0' in exposition
 
 
+async def test_gateway_counts_unsupported_messages_as_ignored(
+    metric_registry: CollectorRegistry,
+) -> None:
+    await handle_update(
+        {
+            "update_id": 2,
+            "message": {
+                "from": {"id": 1},
+                "chat": {"id": 1, "type": "private"},
+                "sticker": {"file_id": "sticker-file"},
+            },
+        },
+        queue_redis=FakeQueueRedis(),
+        cache_redis=FakeCacheRedis(),
+        enqueue_func=_enqueue,
+    )
+
+    exposition = generate_latest(metric_registry).decode()
+    assert 'updates_ignored_total{reason="unsupported_message"} 1.0' in exposition
+
+
 def test_worker_counter_and_histogram_are_registered_in_isolated_registry(
     metric_registry: CollectorRegistry,
 ) -> None:

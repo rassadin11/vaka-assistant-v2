@@ -34,6 +34,8 @@ services:
     expose:
       - "8000"
     depends_on:
+      infisical:
+        condition: service_healthy
       pgbouncer:
         condition: service_healthy
       redis-queue:
@@ -73,6 +75,8 @@ services:
     expose:
       - "9100"
     depends_on:
+      infisical:
+        condition: service_healthy
       pgbouncer:
         condition: service_healthy
       redis-queue:

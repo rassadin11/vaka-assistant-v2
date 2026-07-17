@@ -8,7 +8,7 @@ import pytest
 
 from core.envelope import UpdateEnvelope
 from core.queue import QueueName, RedisSettings
-from gateway.app import create_app, handle_update
+from gateway.app import UNSUPPORTED_MESSAGE_TEXT, create_app, handle_update
 from gateway.config import GatewayConfig
 
 SECRET_PATH = "test-path"
@@ -115,7 +115,7 @@ def _text_update(update_id: int = 1, chat_type: str = "private") -> dict[str, An
     }
 
 
-def _document_update(update_id: int = 2) -> dict[str, Any]:
+def _document_update(update_id: int = 2, *, caption: str | None = None) -> dict[str, Any]:
     update = _text_update(update_id)
     message = update["message"]
     assert isinstance(message, dict)
@@ -126,6 +126,31 @@ def _document_update(update_id: int = 2) -> dict[str, Any]:
         "file_name": "notes.pdf",
         "mime_type": "application/pdf",
     }
+    if caption is not None:
+        message["caption"] = caption
+    return update
+
+
+def _sticker_update(update_id: int = 3, chat_type: str = "private") -> dict[str, Any]:
+    update = _text_update(update_id, chat_type)
+    message = update["message"]
+    assert isinstance(message, dict)
+    message.pop("text")
+    message["sticker"] = {"file_id": "sticker-file"}
+    return update
+
+
+def _photo_update(update_id: int = 4, *, caption: str | None = None) -> dict[str, Any]:
+    update = _text_update(update_id)
+    message = update["message"]
+    assert isinstance(message, dict)
+    message.pop("text")
+    message["photo"] = [
+        {"file_id": "small-photo", "file_size": 100},
+        {"file_id": "large-photo", "file_size": 200},
+    ]
+    if caption is not None:
+        message["caption"] = caption
     return update
 
 
@@ -157,6 +182,33 @@ async def test_document_update_is_enqueued_to_background() -> None:
 
     assert enqueue.envelopes[0][0] == "background"
     assert enqueue.envelopes[0][1].kind == "document"
+
+
+async def test_document_caption_is_preserved_in_payload() -> None:
+    enqueue = RecordingEnqueue()
+    await handle_update(
+        _document_update(caption="проверь файл"),
+        queue_redis=FakeQueueRedis(),
+        cache_redis=FakeCacheRedis(),
+        enqueue_func=enqueue,
+    )
+
+    assert enqueue.envelopes[0][1].payload["caption"] == "проверь файл"
+
+
+async def test_photo_uses_largest_size_with_caption_and_interactive_queue() -> None:
+    enqueue = RecordingEnqueue()
+    await handle_update(
+        _photo_update(caption="это чек"),
+        queue_redis=FakeQueueRedis(),
+        cache_redis=FakeCacheRedis(),
+        enqueue_func=enqueue,
+    )
+
+    queue, envelope = enqueue.envelopes[0]
+    assert queue == "interactive"
+    assert envelope.kind == "photo"
+    assert envelope.payload == {"tg_file_id": "large-photo", "size": 200, "caption": "это чек"}
 
 
 async def test_dedup_key_not_set_when_enqueue_fails() -> None:
@@ -327,12 +379,14 @@ def _client(
     queue_redis: FakeQueueRedis | None = None,
     cache_redis: FakeCacheRedis | None = None,
     enqueue: RecordingEnqueue | None = None,
+    sender: RecordingUserSender | None = None,
 ) -> httpx.AsyncClient:
     app = create_app(
         config=_config(),
         queue_redis=queue_redis if queue_redis is not None else FakeQueueRedis(),
         cache_redis=cache_redis if cache_redis is not None else FakeCacheRedis(),
         enqueue_func=enqueue if enqueue is not None else RecordingEnqueue(),
+        send_user_message=sender,
     )
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://gateway.test")
@@ -348,6 +402,35 @@ async def test_webhook_valid_secret_accepted() -> None:
         )
     assert response.status_code == 200
     assert len(enqueue.envelopes) == 1
+
+
+async def test_webhook_unsupported_private_message_sends_deduplicated_stub() -> None:
+    cache = FakeCacheRedis()
+    sender = RecordingUserSender()
+    async with _client(cache_redis=cache, sender=sender) as client:
+        for _ in range(2):
+            response = await client.post(
+                f"/webhook/{SECRET_PATH}",
+                json=_sticker_update(update_id=31),
+                headers={"X-Telegram-Bot-Api-Secret-Token": SECRET_TOKEN},
+            )
+            assert response.status_code == 200
+
+    assert sender.messages == [(42, UNSUPPORTED_MESSAGE_TEXT)]
+    assert "dedup:31" in cache.existing
+
+
+async def test_webhook_unsupported_group_message_does_not_send_stub() -> None:
+    sender = RecordingUserSender()
+    async with _client(sender=sender) as client:
+        response = await client.post(
+            f"/webhook/{SECRET_PATH}",
+            json=_sticker_update(update_id=32, chat_type="group"),
+            headers={"X-Telegram-Bot-Api-Secret-Token": SECRET_TOKEN},
+        )
+
+    assert response.status_code == 200
+    assert sender.messages == []
 
 
 @pytest.mark.parametrize(

@@ -63,6 +63,7 @@ from worker.scheduler import SchedulerProcessor
 
 if TYPE_CHECKING:
     from worker.documents import PdfIngestProcessor
+    from worker.photos import PhotoOcrProcessor
     from worker.voice import VoiceProcessor
 
 ButtonRows = list[list[tuple[str, str]]]
@@ -136,6 +137,7 @@ async def _run() -> None:
         logging.getLogger(__name__).info("inner processor active: plain echo")
     else:
         from worker.documents import PdfIngestProcessor
+        from worker.photos import PhotoOcrProcessor
         from worker.voice import VoiceProcessor
 
         if service_pool is None or app_pool is None:
@@ -153,6 +155,7 @@ async def _run() -> None:
             queue_redis, app_pool, send_reply, notify_admin, registry, embeddings
         )
         document_processor = PdfIngestProcessor(app_pool, queue_redis, download_file, embeddings)
+        photo_processor = PhotoOcrProcessor(queue_redis, download_file, inner)
         voice_processor = VoiceProcessor(
             app_pool,
             queue_redis,
@@ -175,7 +178,7 @@ async def _run() -> None:
         processor = OnboardingProcessor(
             service_pool=service_pool,
             cache_redis=cache_redis,
-            inner=KindRouter(inner, document_processor, voice_processor),
+            inner=KindRouter(inner, document_processor, photo_processor, voice_processor),
             send=rich_send,
             answer_callback=answer_callback,
             notify_admin=cast(OnboardingNotifyAdmin, notify_admin),
@@ -480,21 +483,25 @@ class TestableEchoProcessor:
 
 
 class KindRouter:
-    """Route active-user document and voice jobs without changing the agent processor."""
+    """Route active-user file jobs without changing the agent processor."""
 
     def __init__(
         self,
         inner: ContextualProcessor,
         documents: PdfIngestProcessor,
+        photos: PhotoOcrProcessor,
         voice: VoiceProcessor,
     ) -> None:
         self._inner = inner
         self._documents = documents
+        self._photos = photos
         self._voice = voice
 
     async def process(self, envelope: UpdateEnvelope, context: TaskContext) -> str | None:
         if envelope.kind == "document":
             return await self._documents.process(envelope, context)
+        if envelope.kind == "photo":
+            return await self._photos.process(envelope, context)
         if envelope.kind == "voice":
             return await self._voice.process(envelope, context)
         return await self._inner.process(envelope, context)

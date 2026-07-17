@@ -15,7 +15,7 @@
 | Секреты приложения | Infisical (в стеке, `http://infisical:8080`), проект prod; контейнеры читают через `core/secrets_entrypoint` при старте |
 | Боты | **@vAssistantv2testbot** — ассистент (webhook, бета); **@vAssistantv2workbot** — канал сводок/алертов владельцу (chat_id 587963165), webhook НЕ ставить (сломает getUpdates) |
 | Машина владельца | ключи API в `C:/Users/Artem/.assistant/bootstrap.env`; SSH-ключ CI-деплоя `C:/Users/Artem/.assistant/deploy-ci-key` (pub уже в authorized_keys deploy) |
-| Модель | `deepseek/deepseek-chat` (OpenRouter, data_collection=deny) → prompt v1; v2-flash включится при переходе на `deepseek/deepseek-v4-flash` |
+| Модель | `deepseek/deepseek-v4-flash` (OpenRouter, data_collection=deny, провайдеры novita→parasail) → prompt v2-flash; задана через Infisical `OPENROUTER_MODEL`/`OPENROUTER_ALLOWED_PROVIDERS` (переключено 2026-07-17); дефолт в коде пока `deepseek/deepseek-chat` |
 
 ## Штатный деплой новой версии
 

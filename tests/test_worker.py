@@ -7,8 +7,8 @@ from collections.abc import Awaitable
 from typing import Any
 
 from core.envelope import UpdateEnvelope
-from core.queue import CONSUMER_GROUPS, DLQ_STREAM, QueueName, stream_key
-from worker.app import Worker, WorkerConfig
+from core.queue import CONSUMER_GROUPS, DLQ_STREAM, USER_DLQ_MESSAGE, QueueName, stream_key
+from worker.app import RETRY_NOTICE_TEXT, Worker, WorkerConfig
 from worker.processor import Processor
 
 
@@ -387,6 +387,44 @@ async def test_three_started_attempts_move_the_next_delivery_to_dlq() -> None:
     assert queue_redis.dlq_entries[0][1]["delivery_count"] == "3"
     assert cache_redis.deleted.count("attempts:457") == 1
     assert callbacks.admin
+
+
+async def test_first_failed_attempt_sends_retry_notice_once_across_retries() -> None:
+    queue_redis = FakeQueueRedis()
+    cache_redis = FakeCacheRedis()
+    envelope = _envelope(update_id=458)
+    worker, callbacks = _worker(queue_redis, cache_redis, processor=FailingProcessor())
+
+    for _ in range(2):
+        queue_redis.read_responses["interactive"].append(_read_response("interactive", envelope))
+        assert await worker.run_once()
+
+    assert callbacks.replies == [(42, RETRY_NOTICE_TEXT)]
+    assert cache_redis.set_calls.count(("retry_notice:458", "1", 3_600, True)) == 2
+
+
+async def test_dlq_diversion_sends_only_dlq_message_not_retry_notice() -> None:
+    queue_redis = FakeQueueRedis()
+    cache_redis = FakeCacheRedis()
+    envelope = _envelope(update_id=459)
+    worker, callbacks = _worker(
+        queue_redis,
+        cache_redis,
+        processor=FailingProcessor(),
+        config=WorkerConfig(
+            max_deliveries=0,
+            reclaim_interval_seconds=999,
+            lock_retry_sleep_seconds=0,
+            lock_wait_timeout_seconds=0,
+            stream_order_wait_timeout_seconds=0,
+        ),
+    )
+    queue_redis.read_responses["interactive"].append(_read_response("interactive", envelope))
+
+    assert await worker.run_once()
+
+    assert callbacks.replies == [(42, USER_DLQ_MESSAGE)]
+    assert not any(name == "retry_notice:459" for name, _, _, _ in cache_redis.set_calls)
 
 
 async def test_lock_contention_leaves_message_pending_without_ack() -> None:
