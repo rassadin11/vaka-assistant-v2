@@ -1,4 +1,4 @@
-"""Closed-beta onboarding processor for Telegram users."""
+"""Onboarding processor for Telegram users."""
 
 # ruff: noqa: RUF001
 
@@ -8,7 +8,8 @@ import logging
 import uuid
 from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from enum import StrEnum
+from typing import Protocol
 from zoneinfo import available_timezones
 
 import asyncpg
@@ -20,35 +21,53 @@ from core.envelope import UpdateEnvelope
 from worker.processor import ContextualProcessor
 from worker.reply import WorkerReply
 
-APPLICATION_RECEIVED_TEXT = (
-    "Привет! Это закрытая бета персонального ассистента. Заявка на доступ отправлена — "
-    "напишу, как только её одобрят."
-)
-PENDING_REPEAT_TEXT = "Заявка ещё на рассмотрении — напишу, как только будет решение."
 REJECTED_TEXT = "Пока не получилось открыть доступ — места в бете ограничены. Спасибо за интерес!"
-TIMEZONE_PROMPT_TEXT = (
-    "Доступ открыт! Чтобы напоминания приходили вовремя, выберите ваш город — "
-    "так я узнаю часовой пояс:"
+START_TIMEZONE_PROMPT_TEXT = (
+    "Привет! Я — персональный ассистент: расходы, напоминания, поиск в интернете, "
+    "PDF-документы — всё обычными словами в чате, текстом или голосом.\n\n"
+    "Чтобы напоминания приходили вовремя, выберите ваш город — так я узнаю часовой пояс:"
 )
 ASSISTANT_CAPABILITIES_TEXT = (
-    "Я персональный ассистент. Что умею:\n"
-    "• вести учёт расходов и бюджеты — «потратил 750 на обед», «сколько я трачу на еду?»\n"
-    "• напоминать о делах — «напомни завтра в 10 позвонить маме»\n"
-    "• искать в интернете — «что нового у Яндекса? поищи»\n"
-    "• разбирать PDF-документы — пришлите файл и спрашивайте по содержимому\n"
-    "• запоминать важное — «запомни: у меня аллергия на арахис»\n"
-    "• показать наглядно — кнопка меню открывает календарь напоминаний и дашборд расходов\n\n"
-    "Пишите как удобно, своими словами — я пойму. Я в бете и учусь: если что-то пойдёт не так, "
-    "напишите /feedback <текст> — прочитаю и исправлюсь."
+    "Я — персональный ассистент. Мне не нужны команды: пишите обычными словами — или просто "
+    "**надиктуйте голосовое**, я понимаю речь и сделаю всё то же самое. «Потратил триста на "
+    "кофе» вслух по дороге — и расход уже записан.\n\n"
+    "Что я умею:\n\n"
+    "💰 **Расходы и бюджеты** — «потратил 300 на кофе», «сколько ушло на еду в этом месяце?»\n"
+    "⏰ **Напоминания** — «напомни завтра в 9 позвонить маме», в том числе повторяющиеся\n"
+    "🌐 **Поиск в интернете** — «поищи, что нового у Яндекса». Такие ответы занимают чуть "
+    "больше времени, чем обычные — я реально хожу по сайтам\n"
+    "📄 **PDF-документы** — пришлите файл и задавайте вопросы по содержимому\n"
+    "🧠 **Память** — «запомни: у меня аллергия на арахис» — учту во всех будущих ответах\n\n"
+    "Календарь напоминаний и дашборд расходов — по кнопке меню слева от поля ввода."
 )
-WELCOME_TEXT = "Часовой пояс сохранён: {tz}.\n\n" + ASSISTANT_CAPABILITIES_TEXT
-HELP_TEXT = ASSISTANT_CAPABILITIES_TEXT
+WELCOME_TEXT = "Часовой пояс сохранён: {tz}. Всё готово 👌\n\n" + ASSISTANT_CAPABILITIES_TEXT
+WELCOME_CTA_TEXT = (
+    "Давайте попробуем прямо сейчас. Напишите — или наговорите голосом — что-нибудь одно:\n\n"
+    "«Потратил 300 на кофе»\n"
+    "«Напомни завтра в 9 сделать зарядку»\n"
+    "«Запомни: мою собаку зовут Бакс»\n\n"
+    "Не команда, а просто фраза — как написали бы другу. Если что-то пойдёт не так — "
+    "/feedback <текст>: я в бете и учусь."
+)
+HELP_TEXT = (
+    ASSISTANT_CAPABILITIES_TEXT
+    + "\n\nЕсли что-то пойдёт не так — напишите /feedback <текст>: прочитаю и исправлюсь."
+)
+HINT_FINANCE_TEXT = (
+    "Кстати: все расходы наглядно — на дашборде «Финансы» (кнопка меню). А ещё можно задать "
+    "бюджет: «поставь бюджет 10 000 на еду в месяц» — предупрежу, когда он будет подходить к "
+    "концу."
+)
+HINT_REMINDER_TEXT = (
+    "Кстати: все напоминания видны в календаре (кнопка меню). Могу и повторяющиеся: "
+    "«напоминай каждый понедельник в 9 про планёрку»."
+)
+HINT_VOICE_TEXT = (
+    "Кстати: голосовые я понимаю до 5 минут — удобно надиктовывать расходы и напоминания на ходу."
+)
 ALREADY_ACTIVE_TEXT = "Вы уже в деле! Команда /help напомнит, что я умею."
 FEEDBACK_CONFIRMATION_TEXT = "Спасибо! Передал команде — это помогает делать ассистента лучше."
 FEEDBACK_HINT_TEXT = "Напишите отзыв одним сообщением: /feedback <текст>"
-ADMIN_NEW_APPLICATION_TEXT = (
-    "Новая заявка: id {tg_user_id}. /approve {tg_user_id} или /reject {tg_user_id}"
-)
 UNKNOWN_CITY_TEXT = (
     "Не узнал город — выберите кнопкой или пришлите крупный город рядом (например, „Самара“)."
 )
@@ -96,10 +115,16 @@ VALID_TIMEZONES = frozenset(available_timezones())
 LOGGER = logging.getLogger(__name__)
 
 
-class CacheRedis(Protocol):
-    """Subset of Redis cache commands used by onboarding."""
+class OnboardingHintAxis(StrEnum):
+    """One-time onboarding hint categories."""
 
-    def exists(self, name: str) -> Awaitable[int]: ...
+    FINANCE = "finance"
+    REMINDER = "reminder"
+    VOICE = "voice"
+
+
+class HintRedis(Protocol):
+    """Redis command required for permanent onboarding hint claims."""
 
     def set(
         self,
@@ -109,6 +134,12 @@ class CacheRedis(Protocol):
         ex: int | None = None,
         nx: bool = False,
     ) -> Awaitable[object]: ...
+
+
+class CacheRedis(HintRedis, Protocol):
+    """Subset of Redis cache commands used by onboarding."""
+
+    def exists(self, name: str) -> Awaitable[int]: ...
 
     def delete(self, *names: str) -> Awaitable[int]: ...
 
@@ -155,7 +186,7 @@ class UserRow:
 
 
 class OnboardingProcessor:
-    """Wrap an inner processor with closed-beta access control and onboarding."""
+    """Wrap an inner processor with access control and onboarding."""
 
     def __init__(
         self,
@@ -194,12 +225,15 @@ class OnboardingProcessor:
 
         user = await self._resolve_user(envelope.user_id)
         if user is None:
-            await self._create_pending_user(envelope)
-            await self._notify_admin(ADMIN_NEW_APPLICATION_TEXT.format(tg_user_id=envelope.user_id))
-            return APPLICATION_RECEIVED_TEXT
+            await self._create_active_user(envelope)
+            await self._start_timezone_selection(envelope.user_id, envelope.chat_id)
+            await self._notify_admin(f"Новый пользователь: id {envelope.user_id}.")
+            return None
 
         if user.status == "pending":
-            return PENDING_REPEAT_TEXT
+            await self._activate_pending_user(user.tg_user_id)
+            await self._start_timezone_selection(user.tg_user_id, user.tg_chat_id)
+            return None
         if user.status == "rejected":
             return await self._rejected_reply_once_per_day(envelope.user_id)
         if user.status == "banned":
@@ -221,17 +255,6 @@ class OnboardingProcessor:
 
     async def _try_admin_command(self, envelope: UpdateEnvelope, text: str) -> str | None:
         command, *args = text.strip().split()
-        if command == "/pending":
-            if args:
-                return _admin_usage()
-            return await self._pending_users_text()
-        if command == "/approve":
-            if len(args) != 1:
-                return _admin_usage()
-            tg_user_id = _parse_tg_user_id(args[0])
-            if tg_user_id is None:
-                return _admin_usage()
-            return await self._approve_user(tg_user_id)
         if command == "/reject":
             if len(args) != 1:
                 return _admin_usage()
@@ -241,49 +264,24 @@ class OnboardingProcessor:
             return await self._reject_user(tg_user_id)
         return None
 
-    async def _pending_users_text(self) -> str:
+    async def _activate_pending_user(self, tg_user_id: int) -> None:
         async with service_transaction(self._service_pool) as connection:
-            rows = await connection.fetch(
-                """
-                SELECT tg_user_id, first_name, username, created_at
-                FROM users
-                WHERE status = 'pending'
-                ORDER BY created_at NULLS LAST, tg_user_id
-                """
-            )
-        if not rows:
-            return "Нет заявок на рассмотрении."
-
-        lines = ["Заявки на рассмотрении:"]
-        for row in rows:
-            first_name = _optional_str(row, "first_name") or "-"
-            username = _optional_str(row, "username")
-            username_text = f"@{username}" if username else "-"
-            created_at = row["created_at"]
-            lines.append(f"{row['tg_user_id']} | {first_name} | {username_text} | {created_at}")
-        return "\n".join(lines)
-
-    async def _approve_user(self, tg_user_id: int) -> str:
-        async with service_transaction(self._service_pool) as connection:
-            row = await connection.fetchrow(
+            await connection.execute(
                 """
                 UPDATE users
                 SET status = 'active', updated_at = now()
-                WHERE tg_user_id = $1
-                RETURNING tg_chat_id
+                WHERE tg_user_id = $1 AND status = 'pending'
                 """,
                 tg_user_id,
             )
-        if row is None:
-            return f"Пользователь {tg_user_id} не найден."
 
+    async def _start_timezone_selection(self, tg_user_id: int, chat_id: int) -> None:
         await self._cache_redis.set(
             _tz_pending_key(tg_user_id),
             "1",
             ex=TIMEZONE_PENDING_TTL_SECONDS,
         )
-        await self._send(row["tg_chat_id"], TIMEZONE_PROMPT_TEXT, TIMEZONE_BUTTONS)
-        return f"Пользователь {tg_user_id} одобрен."
+        await self._send(chat_id, START_TIMEZONE_PROMPT_TEXT, TIMEZONE_BUTTONS)
 
     async def _reject_user(self, tg_user_id: int) -> str:
         async with service_transaction(self._service_pool) as connection:
@@ -323,7 +321,7 @@ class OnboardingProcessor:
             plan=row["plan"],
         )
 
-    async def _create_pending_user(self, envelope: UpdateEnvelope) -> None:
+    async def _create_active_user(self, envelope: UpdateEnvelope) -> None:
         user_id = uuid.UUID(str(uuid_utils.uuid7()))
         async with service_transaction(self._service_pool) as connection:
             await connection.execute(
@@ -337,7 +335,7 @@ class OnboardingProcessor:
                     created_at,
                     updated_at
                 )
-                VALUES ($1, $2, $3, 'pending', $4, now(), now())
+                VALUES ($1, $2, $3, 'active', $4, now(), now())
                 """,
                 user_id,
                 envelope.user_id,
@@ -406,28 +404,35 @@ class OnboardingProcessor:
             return OTHER_CITY_TEXT
         if timezone not in VALID_TIMEZONES:
             return None
-        return await self._save_timezone(envelope.user_id, timezone)
+        await self._save_timezone(envelope.user_id, timezone)
+        return None
 
     async def _process_timezone_text(self, envelope: UpdateEnvelope, text: str) -> str | None:
         timezone = CITY_TZ.get(text.strip().lower())
         if timezone is None:
             await self._send(envelope.chat_id, UNKNOWN_CITY_TEXT, TIMEZONE_BUTTONS)
             return None
-        return await self._save_timezone(envelope.user_id, timezone)
+        await self._save_timezone(envelope.user_id, timezone)
+        return None
 
-    async def _save_timezone(self, tg_user_id: int, timezone: str) -> str:
+    async def _save_timezone(self, tg_user_id: int, timezone: str) -> None:
         async with service_transaction(self._service_pool) as connection:
-            await connection.execute(
+            row = await connection.fetchrow(
                 """
                 UPDATE users
                 SET timezone = $2, updated_at = now()
                 WHERE tg_user_id = $1
+                RETURNING tg_chat_id
                 """,
                 tg_user_id,
                 timezone,
             )
+        if row is None:
+            self._logger.warning("timezone save target disappeared: tg_user_id=%s", tg_user_id)
+            return
         await self._cache_redis.delete(_tz_pending_key(tg_user_id))
-        return WELCOME_TEXT.format(tz=timezone)
+        await self._send(row["tg_chat_id"], WELCOME_TEXT.format(tz=timezone))
+        await self._send(row["tg_chat_id"], WELCOME_CTA_TEXT)
 
 
 def _payload_text(envelope: UpdateEnvelope) -> str | None:
@@ -454,7 +459,7 @@ def _parse_tg_user_id(raw_value: str) -> int | None:
 
 
 def _admin_usage() -> str:
-    return "Использование: /pending, /approve <tg_user_id>, /reject <tg_user_id>."
+    return "Использование: /reject <tg_user_id>."
 
 
 def _tz_pending_key(tg_user_id: int) -> str:
@@ -465,12 +470,29 @@ def _rejected_notified_key(tg_user_id: int) -> str:
     return f"onboarding:rejected_notified:{tg_user_id}"
 
 
-def _optional_str(row: MappingRow, key: str) -> str | None:
-    value = row[key]
-    return value if isinstance(value, str) else None
+async def claim_onboarding_hint(
+    redis: HintRedis,
+    axis: OnboardingHintAxis,
+    tg_user_id: int,
+    *,
+    logger: logging.Logger | None = None,
+) -> bool:
+    """Claim a permanent one-time hint slot, failing open on Redis errors."""
 
-
-class MappingRow(Protocol):
-    """Minimal row lookup protocol shared by asyncpg records and test fakes."""
-
-    def __getitem__(self, key: str) -> Any: ...
+    active_logger = logger if logger is not None else LOGGER
+    try:
+        return bool(
+            await redis.set(
+                f"onboarding:hint:{axis.value}:{tg_user_id}",
+                "1",
+                nx=True,
+            )
+        )
+    except Exception:
+        active_logger.warning(
+            "onboarding hint claim failed: axis=%s tg_user_id=%s",
+            axis.value,
+            tg_user_id,
+            exc_info=True,
+        )
+        return False

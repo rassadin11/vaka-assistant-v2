@@ -1,4 +1,4 @@
-"""Integration test for closed-beta onboarding against Postgres and Redis."""
+"""Integration test for onboarding against Postgres and Redis."""
 
 from __future__ import annotations
 
@@ -15,9 +15,10 @@ from core.db import service_transaction
 from core.envelope import UpdateEnvelope
 from core.queue import DEFAULT_REDIS_CACHE_URL
 from worker.onboarding import (
-    APPLICATION_RECEIVED_TEXT,
+    START_TIMEZONE_PROMPT_TEXT,
     TIMEZONE_BUTTONS,
-    TIMEZONE_PROMPT_TEXT,
+    WELCOME_CTA_TEXT,
+    WELCOME_TEXT,
     OnboardingProcessor,
 )
 from worker.processor import EchoProcessor
@@ -111,12 +112,9 @@ async def test_onboarding_round_trip_against_postgres(
             await connection.execute("DELETE FROM users WHERE tg_user_id = $1", tg_user_id)
 
         first_reply = await processor.process(_envelope(update_id, tg_user_id, "/start"))
-        approve_reply = await processor.process(
-            _envelope(update_id + 1, admin_id, f"/approve {tg_user_id}")
-        )
         timezone_reply = await processor.process(
             _envelope(
-                update_id + 2,
+                update_id + 1,
                 tg_user_id,
                 "",
                 kind="callback",
@@ -127,7 +125,7 @@ async def test_onboarding_round_trip_against_postgres(
                 },
             )
         )
-        echo_reply = await processor.process(_envelope(update_id + 3, tg_user_id, "echo me"))
+        echo_reply = await processor.process(_envelope(update_id + 2, tg_user_id, "echo me"))
 
         async with service_transaction(service_pool) as connection:
             row = await connection.fetchrow(
@@ -142,12 +140,14 @@ async def test_onboarding_round_trip_against_postgres(
         async with service_transaction(service_pool) as connection:
             await connection.execute("DELETE FROM users WHERE tg_user_id = $1", tg_user_id)
 
-    assert first_reply == APPLICATION_RECEIVED_TEXT
-    assert approve_reply == f"Пользователь {tg_user_id} одобрен."
-    assert recorder.sent == [(tg_user_id, TIMEZONE_PROMPT_TEXT, TIMEZONE_BUTTONS)]
+    assert first_reply is None
+    assert recorder.sent == [
+        (tg_user_id, START_TIMEZONE_PROMPT_TEXT, TIMEZONE_BUTTONS),
+        (tg_user_id, WELCOME_TEXT.format(tz="Europe/Kaliningrad"), None),
+        (tg_user_id, WELCOME_CTA_TEXT, None),
+    ]
     assert recorder.callbacks == ["cb-integration"]
-    assert timezone_reply is not None
-    assert "Europe/Kaliningrad" in timezone_reply
+    assert timezone_reply is None
     assert echo_reply == "echo me"
     assert row is not None
     assert row["status"] == "active"

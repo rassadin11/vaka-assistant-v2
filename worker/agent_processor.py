@@ -55,7 +55,18 @@ from core.tools_dispatch import ToolDispatcher
 from core.usage_recorder import UsageRecord, UsageRecordingProvider
 from core.usage_store import save_usage
 from worker.app import SendReplyCallback
-from worker.reply import WorkerReply, mini_app_button_for_tools
+from worker.onboarding import (
+    HINT_FINANCE_TEXT,
+    HINT_REMINDER_TEXT,
+    OnboardingHintAxis,
+    claim_onboarding_hint,
+)
+from worker.reply import (
+    CALENDAR_TOOLS,
+    FINANCE_TOOLS,
+    WorkerReply,
+    mini_app_button_for_tools,
+)
 
 UNSUPPORTED_CONTENT_TEXT = "Пока я понимаю только текст."
 LOGGER = logging.getLogger(__name__)
@@ -200,6 +211,7 @@ class AgentProcessor:
         )
         await self._add_recorded_spend(context, recorder.records, _queue_for_envelope(envelope))
         self._schedule_limit_approach_notifications(envelope, context)
+        self._schedule_onboarding_hints(envelope, context, result.tool_names)
 
         if built.needs_summarization and built.trimmed:
             upto_message_id = history.tail[len(built.trimmed) - 1].id
@@ -354,6 +366,74 @@ class AgentProcessor:
                 )
         except Exception:
             self._logger.warning("limit approach notification failed", exc_info=True)
+
+    def _schedule_onboarding_hints(
+        self,
+        envelope: UpdateEnvelope,
+        context: TaskContext,
+        tool_names: tuple[str, ...],
+    ) -> None:
+        """Queue one-time feature hints for successful interactive tool use."""
+
+        if self._queue_redis is None or envelope.kind != "text":
+            return
+        has_finance = any(name in FINANCE_TOOLS for name in tool_names)
+        has_reminder = any(name in CALENDAR_TOOLS for name in tool_names)
+        if not has_finance and not has_reminder:
+            return
+        task = asyncio.create_task(
+            self._notify_onboarding_hints(context, has_finance, has_reminder)
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _notify_onboarding_hints(
+        self,
+        context: TaskContext,
+        has_finance: bool,
+        has_reminder: bool,
+    ) -> None:
+        """Claim and send independent finance and reminder hints."""
+
+        if self._queue_redis is None:
+            return
+        if has_finance:
+            await self._send_onboarding_hint(
+                context,
+                OnboardingHintAxis.FINANCE,
+                HINT_FINANCE_TEXT,
+            )
+        if has_reminder:
+            await self._send_onboarding_hint(
+                context,
+                OnboardingHintAxis.REMINDER,
+                HINT_REMINDER_TEXT,
+            )
+
+    async def _send_onboarding_hint(
+        self,
+        context: TaskContext,
+        axis: OnboardingHintAxis,
+        text: str,
+    ) -> None:
+        """Deliver one hint without letting its failure suppress another axis."""
+
+        try:
+            if self._queue_redis is None:
+                return
+            if await claim_onboarding_hint(
+                self._queue_redis,
+                axis,
+                context.tg_user_id,
+                logger=self._logger,
+            ):
+                await self._send(context.chat_id, text)
+        except Exception:
+            self._logger.warning(
+                "onboarding hint delivery failed: axis=%s",
+                axis.value,
+                exc_info=True,
+            )
 
 
 def _dynamics(timezone: str, plan: str) -> UserDynamics:

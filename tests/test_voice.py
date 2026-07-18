@@ -14,6 +14,7 @@ from core.envelope import UpdateEnvelope
 from core.limits import message_key
 from core.spend import spend_key
 from core.stt import MockSTTProvider, STTResult, STTUnavailableError
+from worker.onboarding import HINT_VOICE_TEXT
 from worker.voice import (
     DAILY_LIMIT_TEXT,
     EMPTY_TRANSCRIPT_TEXT,
@@ -315,5 +316,34 @@ async def test_voice_limit_approach_notifies_once_after_reaching_eighty_percent(
         (
             context.chat_id,
             LIMIT_APPROACH_VOICE_TEXT.format(used=8, limit=MAX_DAILY_VOICE_MINUTES),
-        )
+        ),
+        (context.chat_id, HINT_VOICE_TEXT),
     ]
+
+
+async def test_voice_hint_redis_failure_is_fail_open() -> None:
+    class FailingHintRedis(FakeRedis):
+        async def set(
+            self, name: str, value: str, *, ex: int | None = None, nx: bool = False
+        ) -> bool:
+            if name.startswith("onboarding:hint:"):
+                raise ConnectionError("redis unavailable")
+            return await super().set(name, value, ex=ex, nx=nx)
+
+    sent: list[tuple[int, str]] = []
+
+    async def send(chat_id: int, text: str) -> None:
+        sent.append((chat_id, text))
+
+    processor = VoiceProcessor(
+        object(),
+        FailingHintRedis(),
+        lambda _file_id, _maximum: _voice_bytes(),
+        MockSTTProvider.scripted([STTResult("hello", 1, Decimal(0))]),
+        RecordingInner(),  # type: ignore[arg-type]
+        send=send,
+    )
+
+    assert await processor.process(_envelope(), _context()) == "agent reply"
+    await asyncio.sleep(0)
+    assert sent == []

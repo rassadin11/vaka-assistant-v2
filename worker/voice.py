@@ -21,6 +21,11 @@ from core.stt import STTProvider, STTUnavailableError
 from core.usage_store import save_stt_usage
 from worker.app import SendReplyCallback
 from worker.documents import MAX_DOCUMENT_BYTES, DownloadFile, QueueRedis
+from worker.onboarding import (
+    HINT_VOICE_TEXT,
+    OnboardingHintAxis,
+    claim_onboarding_hint,
+)
 from worker.processor import ContextualProcessor
 from worker.reply import WorkerReply
 
@@ -129,7 +134,9 @@ class VoiceProcessor:
                     },
                 }
             )
-            return await self._inner.process(rewritten, context)
+            reply = await self._inner.process(rewritten, context)
+            self._schedule_onboarding_hint(context)
+            return reply
         except Exception:
             self._logger.exception(
                 "voice processing failed", extra={"update_id": envelope.update_id}
@@ -177,6 +184,31 @@ class VoiceProcessor:
                 )
         except Exception:
             self._logger.warning("voice limit approach notification failed", exc_info=True)
+
+    def _schedule_onboarding_hint(self, context: TaskContext) -> None:
+        """Queue the permanent one-time voice hint after successful transcription."""
+
+        if self._send is None:
+            return
+        task = asyncio.create_task(self._notify_onboarding_hint(context))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _notify_onboarding_hint(self, context: TaskContext) -> None:
+        """Claim and send the one-time voice onboarding hint."""
+
+        try:
+            if self._send is None:
+                return
+            if await claim_onboarding_hint(
+                self._queue_redis,
+                OnboardingHintAxis.VOICE,
+                context.tg_user_id,
+                logger=self._logger,
+            ):
+                await self._send(context.chat_id, HINT_VOICE_TEXT)
+        except Exception:
+            self._logger.warning("voice onboarding hint delivery failed", exc_info=True)
 
     async def _budget_state(self, context: TaskContext) -> BudgetState:
         """Read the daily budget once before any voice download or STT work."""

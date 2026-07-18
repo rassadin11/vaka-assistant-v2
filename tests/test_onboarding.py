@@ -11,15 +11,14 @@ from uuid import UUID
 from core.context import TaskContext
 from core.envelope import UpdateEnvelope
 from worker.onboarding import (
-    ADMIN_NEW_APPLICATION_TEXT,
     ALREADY_ACTIVE_TEXT,
-    APPLICATION_RECEIVED_TEXT,
+    ASSISTANT_CAPABILITIES_TEXT,
     HELP_TEXT,
-    PENDING_REPEAT_TEXT,
     REJECTED_TEXT,
+    START_TIMEZONE_PROMPT_TEXT,
     TIMEZONE_BUTTONS,
-    TIMEZONE_PROMPT_TEXT,
     UNKNOWN_CITY_TEXT,
+    WELCOME_CTA_TEXT,
     WELCOME_TEXT,
     OnboardingProcessor,
 )
@@ -110,10 +109,10 @@ class FakeConnection:
         if query.lstrip().startswith("UPDATE users"):
             if row is None:
                 return None
-            if "status = 'active'" in query:
-                row["status"] = "active"
-            elif "status = 'rejected'" in query:
+            if "status = 'rejected'" in query:
                 row["status"] = "rejected"
+            elif "SET timezone" in query:
+                row["timezone"] = args[1]
             row["updated_at"] = datetime.now(UTC)
             return {"tg_chat_id": row["tg_chat_id"]}
         if row is None:
@@ -127,14 +126,6 @@ class FakeConnection:
             "plan": row["plan"],
         }
 
-    async def fetch(self, query: str, *args: object) -> list[dict[str, Any]]:
-        del query, args
-        return [
-            row
-            for row in sorted(self._pool.users.values(), key=lambda item: item["tg_user_id"])
-            if row["status"] == "pending"
-        ]
-
     async def execute(self, query: str, *args: object) -> str:
         if query.lstrip().startswith("INSERT INTO users"):
             user_id, tg_user_id, tg_chat_id, timezone = args
@@ -144,17 +135,16 @@ class FakeConnection:
                 "tg_chat_id": tg_chat_id,
                 "username": None,
                 "first_name": None,
-                "status": "pending",
+                "status": "active",
                 "timezone": timezone,
                 "plan": "trial",
                 "created_at": datetime.now(UTC),
                 "updated_at": datetime.now(UTC),
             }
             return "INSERT 0 1"
-        if "SET timezone" in query:
+        if "status = 'active'" in query:
             tg_user_id = int(args[0])
-            timezone = args[1]
-            self._pool.users[tg_user_id]["timezone"] = timezone
+            self._pool.users[tg_user_id]["status"] = "active"
             self._pool.users[tg_user_id]["updated_at"] = datetime.now(UTC)
             return "UPDATE 1"
         raise AssertionError(f"unexpected query: {query}")
@@ -245,7 +235,7 @@ def _processor(
     )
 
 
-async def test_first_contact_creates_pending_notifies_admins_and_replies() -> None:
+async def test_first_contact_creates_active_user_and_prompts_for_timezone() -> None:
     pool = FakePool()
     cache = FakeCache()
     recorder = Recorder()
@@ -253,51 +243,53 @@ async def test_first_contact_creates_pending_notifies_admins_and_replies() -> No
 
     reply = await processor.process(_envelope(tg_user_id=101, chat_id=501, text="hello"))
 
-    assert reply == APPLICATION_RECEIVED_TEXT
-    assert pool.users[101]["status"] == "pending"
+    assert reply is None
+    assert pool.users[101]["status"] == "active"
     assert pool.users[101]["tg_chat_id"] == 501
     assert pool.users[101]["timezone"] == "Europe/Moscow"
-    assert recorder.admin == [ADMIN_NEW_APPLICATION_TEXT.format(tg_user_id=101)]
+    assert cache.values["onboarding:tz_pending:101"] == "1"
+    assert recorder.sent == [(501, START_TIMEZONE_PROMPT_TEXT, TIMEZONE_BUTTONS)]
+    assert recorder.admin == ["Новый пользователь: id 101."]
 
 
-async def test_pending_rejected_and_banned_status_replies() -> None:
+async def test_legacy_pending_user_is_activated_and_prompted_on_contact() -> None:
     pool = FakePool()
     cache = FakeCache()
     recorder = Recorder()
     processor = _processor(pool, cache, recorder)
     pool.add_user(101, status="pending")
+
+    assert await processor.process(_envelope(tg_user_id=101)) is None
+    assert pool.users[101]["status"] == "active"
+    assert cache.values["onboarding:tz_pending:101"] == "1"
+    assert recorder.sent == [(101, START_TIMEZONE_PROMPT_TEXT, TIMEZONE_BUTTONS)]
+
+
+async def test_rejected_and_banned_status_replies() -> None:
+    pool = FakePool()
+    cache = FakeCache()
+    recorder = Recorder()
+    processor = _processor(pool, cache, recorder)
     pool.add_user(102, status="rejected")
     pool.add_user(103, status="banned")
 
-    assert await processor.process(_envelope(tg_user_id=101)) == PENDING_REPEAT_TEXT
     assert await processor.process(_envelope(tg_user_id=102)) == REJECTED_TEXT
     assert await processor.process(_envelope(update_id=2, tg_user_id=102)) is None
     assert await processor.process(_envelope(tg_user_id=103)) is None
 
 
-async def test_admin_pending_approve_and_reject_commands() -> None:
+async def test_admin_reject_command_still_rejects_active_user() -> None:
     pool = FakePool()
     cache = FakeCache()
     recorder = Recorder()
     processor = _processor(pool, cache, recorder)
-    pool.add_user(101, tg_chat_id=501, first_name="T", username="tester")
-    pool.add_user(102, tg_chat_id=502)
+    pool.add_user(102, tg_chat_id=502, status="active")
 
-    pending = await processor.process(_envelope(tg_user_id=900, text="/pending"))
-    approved = await processor.process(_envelope(update_id=2, tg_user_id=900, text="/approve 101"))
-    rejected = await processor.process(_envelope(update_id=3, tg_user_id=900, text="/reject 102"))
+    rejected = await processor.process(_envelope(tg_user_id=900, text="/reject 102"))
 
-    assert pending is not None
-    assert "101 | T | @tester |" in pending
-    assert approved == "Пользователь 101 одобрен."
     assert rejected == "Пользователь 102 отклонён."
-    assert pool.users[101]["status"] == "active"
     assert pool.users[102]["status"] == "rejected"
-    assert ("onboarding:tz_pending:101", "1", 604_800, False) in cache.set_calls
-    assert recorder.sent == [
-        (501, TIMEZONE_PROMPT_TEXT, TIMEZONE_BUTTONS),
-        (502, REJECTED_TEXT, None),
-    ]
+    assert recorder.sent == [(502, REJECTED_TEXT, None)]
 
 
 async def test_admin_malformed_command_returns_usage() -> None:
@@ -306,9 +298,9 @@ async def test_admin_malformed_command_returns_usage() -> None:
     recorder = Recorder()
     processor = _processor(pool, cache, recorder)
 
-    reply = await processor.process(_envelope(tg_user_id=900, text="/approve nope"))
+    reply = await processor.process(_envelope(tg_user_id=900, text="/reject nope"))
 
-    assert reply == "Использование: /pending, /approve <tg_user_id>, /reject <tg_user_id>."
+    assert reply == "Использование: /reject <tg_user_id>."
 
 
 async def test_timezone_callback_updates_timezone_sends_welcome_and_answers_callback() -> None:
@@ -334,7 +326,11 @@ async def test_timezone_callback_updates_timezone_sends_welcome_and_answers_call
     assert recorder.callbacks == ["cb1"]
     assert pool.users[101]["timezone"] == "Asia/Almaty"
     assert "onboarding:tz_pending:101" in cache.deleted
-    assert reply == WELCOME_TEXT.format(tz="Asia/Almaty")
+    assert reply is None
+    assert recorder.sent == [
+        (101, WELCOME_TEXT.format(tz="Asia/Almaty"), None),
+        (101, WELCOME_CTA_TEXT, None),
+    ]
 
 
 async def test_timezone_text_fallback_known_and_unknown_city() -> None:
@@ -350,10 +346,14 @@ async def test_timezone_text_fallback_known_and_unknown_city() -> None:
     known = await processor.process(_envelope(tg_user_id=101, text=" Самара "))
     unknown = await processor.process(_envelope(tg_user_id=102, text="Городок"))
 
-    assert known == WELCOME_TEXT.format(tz="Europe/Samara")
+    assert known is None
     assert pool.users[101]["timezone"] == "Europe/Samara"
     assert unknown is None
-    assert recorder.sent == [(102, UNKNOWN_CITY_TEXT, TIMEZONE_BUTTONS)]
+    assert recorder.sent == [
+        (101, WELCOME_TEXT.format(tz="Europe/Samara"), None),
+        (101, WELCOME_CTA_TEXT, None),
+        (102, UNKNOWN_CITY_TEXT, TIMEZONE_BUTTONS),
+    ]
 
 
 async def test_active_help_start_and_passthrough_to_inner_echo() -> None:
@@ -367,17 +367,12 @@ async def test_active_help_start_and_passthrough_to_inner_echo() -> None:
     assert await processor.process(_envelope(tg_user_id=101, text="/start")) == ALREADY_ACTIVE_TEXT
     assert await processor.process(_envelope(tg_user_id=101, text="echo")) == "echo"
     assert HELP_TEXT == (
-        "Я персональный ассистент. Что умею:\n"
-        "• вести учёт расходов и бюджеты — «потратил 750 на обед», «сколько я трачу на еду?»\n"
-        "• напоминать о делах — «напомни завтра в 10 позвонить маме»\n"
-        "• искать в интернете — «что нового у Яндекса? поищи»\n"
-        "• разбирать PDF-документы — пришлите файл и спрашивайте по содержимому\n"
-        "• запоминать важное — «запомни: у меня аллергия на арахис»\n"
-        "• показать наглядно — кнопка меню открывает календарь напоминаний и дашборд расходов\n\n"
-        "Пишите как удобно, своими словами — я пойму. Я в бете и учусь: если что-то пойдёт не так, "
-        "напишите /feedback <текст> — прочитаю и исправлюсь."
+        ASSISTANT_CAPABILITIES_TEXT
+        + "\n\nЕсли что-то пойдёт не так — напишите /feedback <текст>: прочитаю и исправлюсь."
     )
-    assert WELCOME_TEXT == "Часовой пояс сохранён: {tz}.\n\n" + HELP_TEXT
+    assert WELCOME_TEXT == (
+        "Часовой пояс сохранён: {tz}. Всё готово 👌\n\n" + ASSISTANT_CAPABILITIES_TEXT
+    )
 
 
 async def test_active_feedback_notifies_admin_and_confirms_user() -> None:
@@ -434,7 +429,7 @@ async def test_active_feedback_confirms_user_when_admin_notification_fails() -> 
     assert recorder.admin == ["Отзыв от 101: Тест"]
 
 
-async def test_pending_feedback_uses_normal_application_path() -> None:
+async def test_pending_feedback_autoactivates_before_command_handling() -> None:
     pool = FakePool()
     cache = FakeCache()
     recorder = Recorder()
@@ -443,7 +438,9 @@ async def test_pending_feedback_uses_normal_application_path() -> None:
 
     reply = await processor.process(_envelope(tg_user_id=101, text="/feedback Тест"))
 
-    assert reply == PENDING_REPEAT_TEXT
+    assert reply is None
+    assert pool.users[101]["status"] == "active"
+    assert recorder.sent == [(101, START_TIMEZONE_PROMPT_TEXT, TIMEZONE_BUTTONS)]
     assert recorder.admin == []
 
 

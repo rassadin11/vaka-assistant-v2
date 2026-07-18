@@ -26,6 +26,7 @@ from worker.agent_processor import (
     SOFT_REFUSE_TEXT,
     AgentProcessor,
 )
+from worker.onboarding import HINT_FINANCE_TEXT, HINT_REMINDER_TEXT
 from worker.reply import WorkerReply
 
 
@@ -351,6 +352,166 @@ async def test_mini_app_button_is_only_added_to_relevant_interactive_answers(
         assert result.text == "final answer"
         assert result.mini_app_button is not None
         assert result.mini_app_button.screen == expected_screen
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "hint_text", "axis"),
+    [
+        ("query_transactions", HINT_FINANCE_TEXT, "finance"),
+        ("create_reminder", HINT_REMINDER_TEXT, "reminder"),
+    ],
+)
+async def test_onboarding_tool_hint_is_sent_once_with_permanent_nx_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    hint_text: str,
+    axis: str,
+) -> None:
+    class HintRedis(_BudgetRedis):
+        def __init__(self) -> None:
+            super().__init__("0")
+            self.values: dict[str, str] = {}
+
+        async def get(self, name: str) -> str:
+            return self.values.get(name, "0")
+
+        async def set(
+            self, name: str, value: str, *, ex: int | None = None, nx: bool = False
+        ) -> bool:
+            assert ex is None
+            if nx and name in self.values:
+                return False
+            self.values[name] = value
+            return True
+
+    async def fake_load(*_args: object) -> DialogHistory:
+        return DialogHistory(summary=None, tail=[])
+
+    async def fake_save(*_args: object) -> list[UUID]:
+        return []
+
+    async def tool_handler(_context: TaskContext) -> str:
+        return "tool result"
+
+    sent: list[tuple[int, str]] = []
+
+    async def send(chat_id: int, text: str) -> None:
+        sent.append((chat_id, text))
+
+    monkeypatch.setattr("worker.agent_processor.load_dialog", fake_load)
+    monkeypatch.setattr("worker.agent_processor.save_messages", fake_save)
+    monkeypatch.setattr("worker.agent_processor.save_usage", _save_usage)
+    responses = [
+        mock_tool_call_response(tool_name, "{}"),
+        mock_text_response("first"),
+        mock_tool_call_response(tool_name, "{}"),
+        mock_text_response("second"),
+    ]
+    redis = HintRedis()
+    processor = AgentProcessor(
+        MockLLMProvider.scripted(responses),
+        StaticToolDispatcher(
+            [ToolDefinition(name=tool_name, description="test tool", parameters={})],
+            {tool_name: tool_handler},
+        ),
+        AgentLoopConfig(),
+        app_pool=object(),  # type: ignore[arg-type]
+        send=send,
+        queue_redis=redis,
+    )
+
+    await processor.process(_envelope(), _context())
+    await asyncio.sleep(0)
+    await processor.process(_envelope(), _context())
+    await asyncio.sleep(0)
+
+    assert sent == [(_context().chat_id, hint_text)]
+    assert redis.values[f"onboarding:hint:{axis}:{_context().tg_user_id}"] == "1"
+
+
+async def test_agent_task_never_triggers_onboarding_tool_hints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_load(*_args: object) -> DialogHistory:
+        return DialogHistory(summary=None, tail=[])
+
+    async def fake_save(*_args: object) -> list[UUID]:
+        return []
+
+    async def tool_handler(_context: TaskContext) -> str:
+        return "tool result"
+
+    sent: list[tuple[int, str]] = []
+
+    async def send(chat_id: int, text: str) -> None:
+        sent.append((chat_id, text))
+
+    monkeypatch.setattr("worker.agent_processor.load_dialog", fake_load)
+    monkeypatch.setattr("worker.agent_processor.save_messages", fake_save)
+    monkeypatch.setattr("worker.agent_processor.save_usage", _save_usage)
+    processor = AgentProcessor(
+        MockLLMProvider.scripted(
+            [mock_tool_call_response("query_transactions", "{}"), mock_text_response("done")]
+        ),
+        StaticToolDispatcher(
+            [ToolDefinition(name="query_transactions", description="test", parameters={})],
+            {"query_transactions": tool_handler},
+        ),
+        AgentLoopConfig(),
+        app_pool=object(),  # type: ignore[arg-type]
+        send=send,
+        queue_redis=_BudgetRedis("0"),
+    )
+
+    await processor.process(_agent_task_envelope(), _context())
+    await asyncio.sleep(0)
+
+    assert sent == []
+
+
+async def test_onboarding_tool_hint_redis_failure_is_fail_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingHintRedis(_BudgetRedis):
+        async def set(
+            self, name: str, value: str, *, ex: int | None = None, nx: bool = False
+        ) -> bool:
+            del value, ex, nx
+            if name.startswith("onboarding:hint:"):
+                raise ConnectionError("redis unavailable")
+            return True
+
+    async def fake_load(*_args: object) -> DialogHistory:
+        return DialogHistory(summary=None, tail=[])
+
+    async def fake_save(*_args: object) -> list[UUID]:
+        return []
+
+    async def tool_handler(_context: TaskContext) -> str:
+        return "tool result"
+
+    monkeypatch.setattr("worker.agent_processor.load_dialog", fake_load)
+    monkeypatch.setattr("worker.agent_processor.save_messages", fake_save)
+    monkeypatch.setattr("worker.agent_processor.save_usage", _save_usage)
+    processor = AgentProcessor(
+        MockLLMProvider.scripted(
+            [mock_tool_call_response("query_transactions", "{}"), mock_text_response("done")]
+        ),
+        StaticToolDispatcher(
+            [ToolDefinition(name="query_transactions", description="test", parameters={})],
+            {"query_transactions": tool_handler},
+        ),
+        AgentLoopConfig(),
+        app_pool=object(),  # type: ignore[arg-type]
+        send=_send,
+        queue_redis=FailingHintRedis("0"),
+    )
+
+    result = await processor.process(_envelope(), _context())
+    await asyncio.sleep(0)
+
+    assert isinstance(result, WorkerReply)
+    assert result.text == "done"
 
 
 async def test_trimmed_history_is_summarized_to_its_last_stored_id(
