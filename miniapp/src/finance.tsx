@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import {
   ApiError,
@@ -49,6 +49,8 @@ const categoryMeta: Record<FinanceCategory, { emoji: string; label: string }> = 
 type PeriodKind = "today" | "week" | "month" | "previous" | "custom";
 type ViewState = "loading" | "content" | "empty" | "offline" | "unauthorized" | "error";
 type AiCardState = "loading" | "ready" | "empty" | "budget_exhausted" | "hidden";
+type DirectionFilter = "all" | "expense" | "income";
+type SortOrder = "newest" | "oldest";
 
 interface DateRange {
   from: string;
@@ -95,6 +97,8 @@ export function FinanceScreen({
   const [items, setItems] = useState<FinanceTransaction[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [category, setCategory] = useState<FinanceCategory | undefined>();
+  const [directionFilter, setDirectionFilter] = useState<DirectionFilter>("all");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("newest");
   const [state, setState] = useState<ViewState>("loading");
   const [message, setMessage] = useState("");
   const [notice, setNotice] = useState("");
@@ -264,6 +268,14 @@ export function FinanceScreen({
     }
   }
 
+  const visibleItems = useMemo(() => {
+    const filtered = directionFilter === "all"
+      ? items
+      : items.filter((item) => item.direction === directionFilter);
+    const factor = sortOrder === "newest" ? -1 : 1;
+    return [...filtered].sort((left, right) => factor * left.ts_local.localeCompare(right.ts_local));
+  }, [items, directionFilter, sortOrder]);
+
   return (
     <section class="finance" aria-label="Финансовый дашборд">
       <PeriodSelector
@@ -298,7 +310,21 @@ export function FinanceScreen({
           {state === "empty" ? (
             <p class="finance-empty">Пока нет трат за этот период</p>
           ) : (
-            <TransactionList items={items} deleting={deleting} remove={remove} />
+            <>
+              <TransactionControls
+                direction={directionFilter}
+                onDirection={setDirectionFilter}
+                sort={sortOrder}
+                onSort={setSortOrder}
+                category={category}
+                onCategory={setCategory}
+              />
+              {visibleItems.length === 0 ? (
+                <p class="finance-empty">Нет транзакций по выбранному фильтру</p>
+              ) : (
+                <TransactionList items={visibleItems} deleting={deleting} remove={remove} />
+              )}
+            </>
           )}
           {nextCursor ? (
             <button class="load-more" type="button" disabled={loadingMore} onClick={() => void loadMore()}>
@@ -376,22 +402,28 @@ function CategoryDonut({ data, selected, onSelect }: { data: FinanceSummary; sel
   let offset = 0;
   return <section class="finance-card category-card" aria-labelledby="category-title">
     <h2 id="category-title">По категориям</h2>
-    <svg class="donut" viewBox="0 0 120 120" role="img" aria-label="Диаграмма расходов по категориям">
-      <title>Расходы по категориям</title>
-      <circle class="donut-base" cx="60" cy="60" r="45" />
-      {data.by_category.map((item) => {
-        const length = item.share * 282.743;
-        const segment = <circle
-          class={`donut-segment${selected && selected !== item.category ? " donut-muted" : ""}`}
-          cx="60" cy="60" r="45"
-          stroke={`var(--category-${item.category})`}
-          stroke-dasharray={`${length} ${282.743 - length}`}
-          stroke-dashoffset={-offset}
-        />;
-        offset += length;
-        return segment;
-      })}
-    </svg>
+    <div class="donut-wrap">
+      <svg class="donut" viewBox="0 0 120 120" role="img" aria-label="Диаграмма расходов по категориям">
+        <title>Расходы по категориям</title>
+        <circle class="donut-base" cx="60" cy="60" r="45" />
+        {data.by_category.map((item) => {
+          const length = item.share * 282.743;
+          const segment = <circle
+            class={`donut-segment${selected && selected !== item.category ? " donut-muted" : ""}`}
+            cx="60" cy="60" r="45"
+            stroke={`var(--category-${item.category})`}
+            stroke-dasharray={`${length} ${282.743 - length}`}
+            stroke-dashoffset={-offset}
+          />;
+          offset += length;
+          return segment;
+        })}
+      </svg>
+      <div class="donut-center" aria-hidden="true">
+        <span>Расходы</span>
+        <strong>{rubles(data.totals.expense)}</strong>
+      </div>
+    </div>
     <ul class="category-legend">
       {data.by_category.map((item) => <li>
         <button type="button" aria-pressed={selected === item.category} onClick={() => onSelect(item.category)}>
@@ -404,25 +436,55 @@ function CategoryDonut({ data, selected, onSelect }: { data: FinanceSummary; sel
 }
 
 function BucketChart({ data }: { data: FinanceSummary }) {
-  const maximum = Math.max(...data.by_bucket.map((item) => Number(item.expense)), 1);
+  const buckets = data.by_bucket;
+  const count = buckets.length;
+  const maximum = Math.max(...buckets.map((item) => Number(item.expense)), 1);
+  const width = Math.max(count * 44, 300);
+  const padX = 24;
+  const baseY = 125;
+  const topY = 18;
+  const plotWidth = width - padX * 2;
+  const pointX = (index: number) => (count === 1 ? width / 2 : padX + (plotWidth * index) / (count - 1));
+  const pointY = (value: number) => baseY - (value / maximum) * (baseY - topY);
+  const points = buckets.map((item, index) => ({
+    x: pointX(index),
+    y: pointY(Number(item.expense)),
+    item
+  }));
+  const line = points.map((point) => `${round(point.x)},${round(point.y)}`).join(" ");
+  const area = count > 1
+    ? `M ${round(points[0].x)},${baseY} ${points.map((point) => `L ${round(point.x)},${round(point.y)}`).join(" ")} L ${round(points[count - 1].x)},${baseY} Z`
+    : "";
+  const labelStep = Math.ceil(count / 8);
+  const showValues = count <= 2;
   return <section class="finance-card bucket-card" aria-labelledby="bucket-title">
     <h2 id="bucket-title">Динамика расходов</h2>
-    <svg viewBox={`0 0 ${Math.max(data.by_bucket.length * 34, 320)} 160`} role="img" aria-label="Столбчатый график расходов">
+    <svg viewBox={`0 0 ${width} 160`} role="img" aria-label="График динамики расходов">
       <title>Расходы по времени</title>
-      {data.by_bucket.map((item, index) => {
-        const height = Number(item.expense) / maximum * 110;
-        return <g>
-          <rect x={index * 34 + 8} y={125 - height} width="20" height={height} rx="4"><title>{item.bucket}: {rubles(item.expense)}</title></rect>
-          <text x={index * 34 + 18} y="145" text-anchor="middle">{shortBucket(item.bucket)}</text>
-        </g>;
-      })}
+      <defs>
+        <linearGradient id="bucket-area-gradient" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.25" />
+          <stop offset="100%" stop-color="var(--accent)" stop-opacity="0" />
+        </linearGradient>
+      </defs>
+      {area ? <path class="bucket-area" d={area} /> : null}
+      {count > 1 ? <polyline class="bucket-line" points={line} /> : null}
+      {points.map((point, index) => <g>
+        <circle class="bucket-dot" cx={round(point.x)} cy={round(point.y)} r="3"><title>{point.item.bucket}: {rubles(point.item.expense)}</title></circle>
+        {showValues ? <text class="bucket-value" x={round(point.x)} y={round(point.y) - 9} text-anchor="middle">{rubles(point.item.expense)}</text> : null}
+        {index % labelStep === 0 || index === count - 1 ? <text x={round(point.x)} y="146" text-anchor="middle">{shortBucket(point.item.bucket)}</text> : null}
+      </g>)}
     </svg>
     <ul class="visually-hidden" aria-label="Данные графика расходов">
-      {data.by_bucket.map((item) => (
+      {buckets.map((item) => (
         <li>{item.bucket}: {rubles(item.expense)}</li>
       ))}
     </ul>
   </section>;
+}
+
+function round(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 function Budgets({ data }: { data: FinanceSummary }) {
@@ -433,6 +495,59 @@ function Budgets({ data }: { data: FinanceSummary }) {
       <div class="budget-track" role="progressbar" aria-label={`Бюджет: ${categoryMeta[budget.category].label}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(budget.ratio * 100)}><i style={{ width: `${Math.min(budget.ratio * 100, 100)}%` }} /></div>
       <small>Потрачено {rubles(budget.spent)} из {rubles(budget.limit)}</small>
     </div>)}
+  </section>;
+}
+
+function TransactionControls({
+  direction,
+  onDirection,
+  sort,
+  onSort,
+  category,
+  onCategory
+}: {
+  direction: DirectionFilter;
+  onDirection: (value: DirectionFilter) => void;
+  sort: SortOrder;
+  onSort: (value: SortOrder) => void;
+  category: FinanceCategory | undefined;
+  onCategory: (value: FinanceCategory | undefined) => void;
+}) {
+  const directions: Array<[DirectionFilter, string]> = [
+    ["all", "Все"], ["expense", "Расходы"], ["income", "Доходы"]
+  ];
+  const categories = Object.keys(categoryMeta) as FinanceCategory[];
+  return <section class="transaction-controls" aria-label="Фильтры транзакций">
+    <div class="direction-chips" role="group" aria-label="Тип операции">
+      {directions.map(([value, label]) => (
+        <button type="button" aria-pressed={direction === value} onClick={() => onDirection(value)}>{label}</button>
+      ))}
+    </div>
+    <div class="control-row">
+      <label class="control-select">
+        <span class="visually-hidden">Категория</span>
+        <select
+          value={category ?? ""}
+          onChange={(event) => {
+            const value = event.currentTarget.value;
+            onCategory(value === "" ? undefined : (value as FinanceCategory));
+          }}
+        >
+          <option value="">Все категории</option>
+          {categories.map((value) => (
+            <option value={value}>{categoryMeta[value].emoji} {categoryMeta[value].label}</option>
+          ))}
+        </select>
+      </label>
+      <button
+        type="button"
+        class="sort-toggle"
+        aria-label={sort === "newest" ? "Сортировка: сначала новые" : "Сортировка: сначала старые"}
+        onClick={() => onSort(sort === "newest" ? "oldest" : "newest")}
+      >
+        {sort === "newest" ? "↓ Сначала новые" : "↑ Сначала старые"}
+      </button>
+    </div>
   </section>;
 }
 

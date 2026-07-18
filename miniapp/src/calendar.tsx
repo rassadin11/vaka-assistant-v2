@@ -133,7 +133,15 @@ export function CalendarScreen({
 
   useEffect(() => {
     if (!formOpen) return;
-    return bindBackButton(() => setFormOpen(false));
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFormOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    const unbindBack = bindBackButton(() => setFormOpen(false));
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      unbindBack();
+    };
   }, [formOpen]);
 
   useEffect(() => {
@@ -150,11 +158,6 @@ export function CalendarScreen({
     const next = { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1 };
     setView(next);
     setSelected(`${next.year}-${pad(next.month)}-01`);
-  }
-
-  function goToday() {
-    setView({ year, month });
-    setSelected(today);
   }
 
   function openForm() {
@@ -234,11 +237,10 @@ export function CalendarScreen({
   return (
     <section class="calendar" aria-label="Календарь напоминаний">
       <header class="calendar-toolbar">
-        <button type="button" aria-label="Предыдущий месяц" onClick={() => moveMonth(-1)}>←</button>
+        <button type="button" aria-label="Предыдущий месяц" onClick={() => moveMonth(-1)}><ChevronIcon direction="left" /></button>
         <h2>{monthTitle(view)}</h2>
-        <button type="button" aria-label="Следующий месяц" onClick={() => moveMonth(1)}>→</button>
+        <button type="button" aria-label="Следующий месяц" onClick={() => moveMonth(1)}><ChevronIcon direction="right" /></button>
       </header>
-      <button type="button" class="today-button" onClick={goToday}>Сегодня</button>
       <div
         class="month-grid"
         onTouchStart={(event) => { touchStart.current = event.touches[0]?.clientX ?? null; }}
@@ -282,14 +284,13 @@ export function CalendarScreen({
           <ul>
             {events.map((item) => (
               <li class={item.status === "done" ? "event-done" : ""} key={`${item.id}-${item.occurs_at}`}>
-                <div class={`event-icon event-icon-${item.kind}`} aria-label={item.kind === "agent_task" ? "Задача ассистента" : "Напоминание"}>{item.kind === "agent_task" ? "◆" : "●"}</div>
                 <div class="event-copy">
                   <strong>{item.time_local}</strong>
                   <span>{item.text}</span>
                   {item.recurring ? <small class="repeat-badge">↻ {item.repeat_human}</small> : null}
                 </div>
                 {item.status === "active" ? (
-                  <button type="button" class="cancel-button" disabled={cancelling !== null} onClick={() => void cancel(item)}>Отменить</button>
+                  <button type="button" class="cancel-button" aria-label="Отменить напоминание" disabled={cancelling !== null} onClick={() => void cancel(item)}><TrashIcon /></button>
                 ) : <span class="done-label">Выполнено</span>}
               </li>
             ))}
@@ -299,20 +300,54 @@ export function CalendarScreen({
 
       <button type="button" class="create-button" onClick={openForm}>+ Напоминание</button>
       {formOpen ? (
-        <form class="reminder-form" onSubmit={(event) => void submitReminder(event)}>
-          <h3>Новое напоминание</h3>
-          <label>Текст<textarea required maxLength={500} value={text} onInput={(event) => setText(event.currentTarget.value)} /></label>
-          <div class="form-row">
-            <label>Дата<input type="date" required value={formDate} onInput={(event) => setFormDate(event.currentTarget.value)} /></label>
-            <label>Время<input type="time" required value={formTime} onInput={(event) => setFormTime(event.currentTarget.value)} /></label>
-          </div>
-          <div class="form-actions">
-            <button type="button" onClick={() => setFormOpen(false)}>Закрыть</button>
-            <button type="submit" disabled={submitting || text.length < 1}>{submitting ? "Создаём…" : "Создать"}</button>
-          </div>
-        </form>
+        <div
+          class="modal-overlay"
+          role="presentation"
+          onClick={(event) => { if (event.target === event.currentTarget) setFormOpen(false); }}
+        >
+          <form
+            class="reminder-form"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reminder-form-title"
+            onSubmit={(event) => void submitReminder(event)}
+          >
+            <div class="reminder-form-header">
+              <h3 id="reminder-form-title">Новое напоминание</h3>
+              <button type="button" class="modal-close" aria-label="Закрыть" onClick={() => setFormOpen(false)}>×</button>
+            </div>
+            <label>Текст<textarea required maxLength={500} value={text} onInput={(event) => setText(event.currentTarget.value)} /></label>
+            <div class="form-row">
+              <label>Дата<input type="date" required value={formDate} onInput={(event) => setFormDate(event.currentTarget.value)} /></label>
+              <label>Время<input type="time" required value={formTime} onInput={(event) => setFormTime(event.currentTarget.value)} /></label>
+            </div>
+            <div class="form-actions">
+              <button type="button" onClick={() => setFormOpen(false)}>Закрыть</button>
+              <button type="submit" disabled={submitting || text.length < 1}>{submitting ? "Создаём…" : "Создать"}</button>
+            </div>
+          </form>
+        </div>
       ) : null}
     </section>
+  );
+}
+
+function ChevronIcon({ direction }: { direction: "left" | "right" }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <polyline points={direction === "left" ? "15 18 9 12 15 6" : "9 18 15 12 9 6"} />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <line x1="10" y1="11" x2="10" y2="17" />
+      <line x1="14" y1="11" x2="14" y2="17" />
+    </svg>
   );
 }
 

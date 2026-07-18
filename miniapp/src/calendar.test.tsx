@@ -77,8 +77,8 @@ describe("CalendarScreen", () => {
     await act(async () => {
       await flushEffects();
     });
-    const button = [...document.querySelectorAll("button")].find((item) => item.textContent === "Отменить");
-    expect(button).toBeDefined();
+    const button = document.querySelector<HTMLButtonElement>('button[aria-label="Отменить напоминание"]');
+    expect(button).not.toBeNull();
 
     button?.click();
     button?.click();
@@ -143,9 +143,7 @@ describe("CalendarScreen", () => {
       );
     });
     await act(async () => { await flushEffects(); });
-    const button = [...document.querySelectorAll("button")].find(
-      (item) => item.textContent === "Отменить"
-    );
+    const button = document.querySelector<HTMLButtonElement>('button[aria-label="Отменить напоминание"]');
 
     await act(async () => {
       button?.click();

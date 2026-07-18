@@ -65,14 +65,16 @@ class MockLLMProvider:
         return response
 
 
-def mock_text_response(text: str, *, model: str = _DEFAULT_MODEL) -> LLMResponse:
+def mock_text_response(
+    text: str, *, model: str = _DEFAULT_MODEL, finish_reason: str = "stop"
+) -> LLMResponse:
     """Build a deterministic text response for a mock script."""
 
     return LLMResponse(
         message=LLMMessage(role="assistant", content=text),
         usage=_default_usage(),
         model=model,
-        finish_reason="stop",
+        finish_reason=finish_reason,
     )
 
 

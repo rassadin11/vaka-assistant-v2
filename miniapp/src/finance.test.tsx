@@ -146,6 +146,38 @@ describe("FinanceScreen", () => {
     expect(document.body.textContent).toContain("× Еда");
   });
 
+  it("filters transactions by direction and toggles sort order client-side", async () => {
+    const income: FinanceTransaction = {
+      id: 2,
+      ts_local: "2026-07-10T09:00:00+03:00",
+      amount: "1000.00",
+      direction: "income",
+      category: "salary",
+      description: "Аванс"
+    };
+    const transactions = vi.fn().mockResolvedValue({ items: [transaction, income], next_cursor: null });
+    const api = client({ transactions });
+    mount(api);
+    await flushEffects();
+
+    let rows = [...document.querySelectorAll(".transaction-list li")];
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.textContent).toContain("Обед");
+    expect(rows[1]?.textContent).toContain("Аванс");
+
+    button("Сначала новые").click();
+    await flushEffects();
+    rows = [...document.querySelectorAll(".transaction-list li")];
+    expect(rows[0]?.textContent).toContain("Аванс");
+
+    button("Доходы").click();
+    await flushEffects();
+    rows = [...document.querySelectorAll(".transaction-list li")];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.textContent).toContain("Аванс");
+    expect(transactions).toHaveBeenCalledTimes(1);
+  });
+
   it("appends pages without duplicate transactions", async () => {
     const second = { ...transaction, id: 2, description: "Такси", category: "transport" as const };
     const transactions = vi.fn()

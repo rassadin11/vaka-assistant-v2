@@ -145,7 +145,7 @@ async def generate_finance_summary(
     provider: LLMProvider,
     finance: FinanceSummary,
     top_transactions: Sequence[TopExpenseTransaction],
-) -> tuple[str, tuple[UsageRecord, ...]]:
+) -> tuple[str, str | None, tuple[UsageRecord, ...]]:
     """Make the single direct provider call required by the finance summary."""
 
     recorder = UsageRecordingProvider(provider)
@@ -155,12 +155,12 @@ async def generate_finance_summary(
             LLMMessage(role="user", content=build_finance_summary_json(finance, top_transactions)),
         ],
         temperature=0.3,
-        max_tokens=300,
+        max_tokens=600,
     )
     text = (response.message.content or "").strip()
     if not text:
         raise RuntimeError("finance summary provider returned no text")
-    return text, tuple(recorder.records)
+    return text, response.finish_reason, tuple(recorder.records)
 
 
 async def orchestrate_finance_summary(
@@ -213,13 +213,25 @@ async def orchestrate_finance_summary(
             await _write_cached(cache_redis, cache_key, result, NEGATIVE_CACHE_TTL_SECONDS)
             return result
         try:
-            text, records = await generate_finance_summary(provider, finance, top_transactions)
+            text, finish_reason, records = await generate_finance_summary(
+                provider, finance, top_transactions
+            )
             await usage_saver(pool, user_id, trace_id, "background", records)
             total_cost = sum((record.cost_usd for record in records), Decimal(0))
             await add_spend(queue_redis, user_id, timezone, total_cost)
             record_llm_cost(total_cost, "background")
         except Exception:
             LOGGER.warning("finance AI summary generation failed", exc_info=True)
+            result = AiSummaryResult(status="unavailable", outcome="unavailable")
+            await _write_cached(cache_redis, cache_key, result, NEGATIVE_CACHE_TTL_SECONDS)
+            return result
+        if finish_reason == "length":
+            # The provider hit the token limit mid-sentence. Do not positive-cache a
+            # truncated summary for hours; negative-cache briefly so it regenerates soon.
+            LOGGER.warning(
+                "finance AI summary truncated by token limit; not caching",
+                extra={"user_id": str(user_id), "trace_id": str(trace_id)},
+            )
             result = AiSummaryResult(status="unavailable", outcome="unavailable")
             await _write_cached(cache_redis, cache_key, result, NEGATIVE_CACHE_TTL_SECONDS)
             return result
