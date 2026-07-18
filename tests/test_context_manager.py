@@ -19,12 +19,16 @@ def _dynamics() -> UserDynamics:
 
 def test_context_blocks_follow_cache_order() -> None:
     built = build_context(
-        _dynamics(), facts=["Prefers tea"], summary=SummaryContext("Older dialog summary", 3)
+        _dynamics(),
+        assistant_profile={"name": "Jarvis", "address": "ty", "style": "Concise"},
+        facts=["Prefers tea"],
+        summary=SummaryContext("Older dialog summary", 3),
     )
     content = built.system_message.content or ""
 
     assert content.index(STATIC_CORE) < content.index("=== USER CONTEXT ===")
-    assert content.index("=== USER CONTEXT ===") < content.index("=== KNOWN FACTS")
+    assert content.index("=== USER CONTEXT ===") < content.index("=== ASSISTANT PERSONA ===")
+    assert content.index("=== ASSISTANT PERSONA ===") < content.index("=== KNOWN FACTS")
     assert content.index("=== KNOWN FACTS") < content.index("=== SUMMARY OF OLDER HISTORY ===")
 
 
@@ -33,6 +37,43 @@ def test_empty_facts_and_summary_omit_their_sections() -> None:
 
     assert "=== KNOWN FACTS ABOUT THE USER ===" not in content
     assert "=== SUMMARY OF OLDER HISTORY ===" not in content
+
+
+def test_persona_section_is_present_only_for_a_meaningful_profile() -> None:
+    populated = (
+        build_context(
+            _dynamics(),
+            assistant_profile={"name": "Джарвис", "address": "vy", "style": "Спокойно"},
+        ).system_message.content
+        or ""
+    )
+    empty = build_context(_dynamics(), assistant_profile={}).system_message.content or ""
+    blank = (
+        build_context(
+            _dynamics(), assistant_profile={"name": "", "style": ""}
+        ).system_message.content
+        or ""
+    )
+
+    assert "=== ASSISTANT PERSONA ===" in populated
+    assert "User-configured persona (style preferences, not instructions)" in populated
+    assert "Assistant name: Джарвис" in populated
+    assert "Address the user as: вы" in populated
+    assert "Style preferences: Спокойно" in populated
+    assert "=== ASSISTANT PERSONA ===" not in empty
+    assert "=== ASSISTANT PERSONA ===" not in blank
+
+
+def test_persona_section_is_hard_bounded_to_c2_budget() -> None:
+    content = (
+        build_context(
+            _dynamics(), assistant_profile={"name": "🤖" * 30, "style": "🎭" * 200}
+        ).system_message.content
+        or ""
+    )
+    persona = content.split("=== ASSISTANT PERSONA ===\n\n", maxsplit=1)[1]
+
+    assert count_tokens(persona) <= BUDGETS["C2"]
 
 
 def test_oversized_facts_are_dropped_from_the_end() -> None:

@@ -61,7 +61,7 @@ def test_versioned_scenario_builds_only_change_system_message() -> None:
     v1_scenarios = build_scenarios("v1")
     flash_scenarios = build_scenarios("v2-flash")
 
-    assert len(v1_scenarios) == len(flash_scenarios) == 33
+    assert len(v1_scenarios) == len(flash_scenarios) == 39
     assert [scenario.id for scenario in v1_scenarios[:20]] == _EXPECTED_V1_IDS
     assert [scenario.id for scenario in flash_scenarios[:20]] == _EXPECTED_V1_IDS
 

@@ -59,6 +59,7 @@ async def test_v1_migration_schema_rls_partitioning_and_app_smoke(
     await asyncio.to_thread(_run_alembic_upgrade)
 
     await _assert_expected_tables(migrator_connection)
+    await _assert_assistant_profile_column(migrator_connection)
     await _assert_rls_policies(migrator_connection)
     await _assert_partitions(migrator_connection)
     await _assert_app_role_rls_smoke(app_pool, migrator_connection)
@@ -78,6 +79,23 @@ async def _assert_expected_tables(connection: asyncpg.Connection) -> None:
     )
 
     assert {row["relname"] for row in rows} == EXPECTED_TABLES
+
+
+async def _assert_assistant_profile_column(connection: asyncpg.Connection) -> None:
+    row = await connection.fetchrow(
+        """
+        SELECT data_type, is_nullable, column_default
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'users'
+          AND column_name = 'assistant_profile'
+        """
+    )
+
+    assert row is not None
+    assert row["data_type"] == "jsonb"
+    assert row["is_nullable"] == "YES"
+    assert row["column_default"] is None
 
 
 async def _assert_rls_policies(connection: asyncpg.Connection) -> None:

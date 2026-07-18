@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -153,7 +154,7 @@ class AgentLoop:
                     tool_calls,
                 )
 
-            messages.append(assistant)
+            messages.append(_with_sanitized_tool_calls(assistant))
             malformed_in_round = False
             for tool_call in tool_requests:
                 active_tool_name[0] = tool_call.name
@@ -198,3 +199,33 @@ class AgentLoop:
 
 def _monotonic() -> float:
     return asyncio.get_running_loop().time()
+
+
+def _with_sanitized_tool_calls(message: LLMMessage) -> LLMMessage:
+    """Repair unparseable tool-call arguments before echoing the message back.
+
+    Providers (confirmed on Parasail) validate every message in the request,
+    including prior assistant turns, and reject the whole request when a
+    historical tool call carries invalid JSON — which would make the malformed
+    retry loop crash instead of self-correcting.
+    """
+
+    calls = message.tool_calls
+    if not calls:
+        return message
+    sanitized = [
+        call
+        if _is_json_object(call.arguments_json)
+        else call.model_copy(update={"arguments_json": "{}"})
+        for call in calls
+    ]
+    if sanitized == calls:
+        return message
+    return message.model_copy(update={"tool_calls": sanitized})
+
+
+def _is_json_object(arguments_json: str) -> bool:
+    try:
+        return isinstance(json.loads(arguments_json), dict)
+    except json.JSONDecodeError:
+        return False

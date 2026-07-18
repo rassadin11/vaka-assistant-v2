@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -109,6 +110,31 @@ async def test_invalid_json_tool_call_is_reported_and_can_be_corrected() -> None
     assert provider.calls[1].messages[-1].content == (
         "Ошибка инструмента: Аргументы инструмента должны быть корректным JSON-объектом."
     )
+
+
+async def test_malformed_tool_call_arguments_are_sanitized_in_replayed_history() -> None:
+    provider = MockLLMProvider.scripted(
+        [
+            mock_tool_call_response("get_current_time", '{}""'),
+            mock_tool_call_response("get_current_time", "{}"),
+            mock_text_response("Готово"),
+        ]
+    )
+    loop = AgentLoop(provider, _dispatcher())
+
+    result = await loop.run([LLMMessage(role="user", content="проверь")], _context())
+
+    assert result.stop_reason == "answer"
+    replayed_assistants = [
+        message
+        for call in provider.calls[1:]
+        for message in call.messages
+        if message.role == "assistant" and message.tool_calls
+    ]
+    assert replayed_assistants
+    for message in replayed_assistants:
+        for tool_call in message.tool_calls or []:
+            assert isinstance(json.loads(tool_call.arguments_json), dict)
 
 
 async def test_three_malformed_rounds_return_fallback_without_a_fourth_llm_call() -> None:

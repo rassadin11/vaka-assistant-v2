@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -81,6 +82,7 @@ class FakePool:
         timezone: str = "Europe/Moscow",
         first_name: str | None = None,
         username: str | None = None,
+        assistant_profile: dict[str, str] | None = None,
     ) -> None:
         self.users[tg_user_id] = {
             "id": UUID("018f0000-0000-7000-8000-000000000001"),
@@ -91,6 +93,7 @@ class FakePool:
             "status": status,
             "timezone": timezone,
             "plan": "trial",
+            "assistant_profile": assistant_profile,
             "created_at": datetime(2026, 7, 9, 12, 0, tzinfo=UTC),
             "updated_at": datetime(2026, 7, 9, 12, 0, tzinfo=UTC),
         }
@@ -124,6 +127,11 @@ class FakeConnection:
             "status": row["status"],
             "timezone": row["timezone"],
             "plan": row["plan"],
+            "assistant_profile": (
+                None
+                if row["assistant_profile"] is None
+                else json.dumps(row["assistant_profile"], ensure_ascii=False)
+            ),
         }
 
     async def execute(self, query: str, *args: object) -> str:
@@ -138,6 +146,7 @@ class FakeConnection:
                 "status": "active",
                 "timezone": timezone,
                 "plan": "trial",
+                "assistant_profile": None,
                 "created_at": datetime.now(UTC),
                 "updated_at": datetime.now(UTC),
             }
@@ -458,7 +467,13 @@ async def test_active_user_context_uses_the_already_resolved_user_row() -> None:
         notify_admin=recorder.notify_admin,
         admin_ids=(900,),
     )
-    pool.add_user(101, tg_chat_id=501, status="active", timezone="Asia/Almaty")
+    pool.add_user(
+        101,
+        tg_chat_id=501,
+        status="active",
+        timezone="Asia/Almaty",
+        assistant_profile={"name": "Джарвис", "address": "ty"},
+    )
     envelope = _envelope(tg_user_id=101, chat_id=999, text="hello")
 
     assert await processor.process(envelope) == "received"
@@ -470,4 +485,24 @@ async def test_active_user_context_uses_the_already_resolved_user_row() -> None:
         timezone="Asia/Almaty",
         plan="trial",
         trace_id=envelope.trace_id,
+        assistant_profile={"name": "Джарвис", "address": "ty"},
     )
+
+
+def test_onboarding_persona_copy_is_exact_and_ordered() -> None:
+    persona_bullet = (
+        "🎭 **Персона** — «называй себя Джарвис», «общайся на ты» — имя и стиль сохранятся навсегда"
+    )
+    persona_cta = (
+        "А ещё мне можно дать имя и стиль: «называй себя Джарвис и общайся со мной на ты»."
+    )
+
+    assert persona_bullet in ASSISTANT_CAPABILITIES_TEXT
+    assert ASSISTANT_CAPABILITIES_TEXT.index("🧠 **Память**") < (
+        ASSISTANT_CAPABILITIES_TEXT.index(persona_bullet)
+    )
+    assert ASSISTANT_CAPABILITIES_TEXT.index(persona_bullet) < (
+        ASSISTANT_CAPABILITIES_TEXT.index("Календарь напоминаний")
+    )
+    assert persona_cta in WELCOME_CTA_TEXT
+    assert WELCOME_CTA_TEXT.index(persona_cta) < WELCOME_CTA_TEXT.index("/feedback")

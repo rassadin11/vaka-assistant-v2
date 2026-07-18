@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -17,3 +18,4 @@ class TaskContext:
     timezone: str
     plan: str
     trace_id: UUID
+    assistant_profile: Mapping[str, str] | None = None

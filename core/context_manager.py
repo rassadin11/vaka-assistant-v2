@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from core.llm import LLMMessage, serialize_tool_calls
 from core.prompt import PROMPT_VERSION, get_prompt
 from core.tokens import count_tokens, truncate_to_tokens
 
-BUDGETS: dict[str, int] = {"A": 1500, "C": 100, "D": 400, "E": 800, "F": 3000}
+BUDGETS: dict[str, int] = {
+    "A": 1500,
+    "C": 100,
+    "C2": 200,
+    "D": 400,
+    "E": 800,
+    "F": 3000,
+}
 
 _USER_DYNAMICS_HEADER = "=== USER CONTEXT ==="
+_PERSONA_HEADER = "=== ASSISTANT PERSONA ==="
 _FACTS_HEADER = "=== KNOWN FACTS ABOUT THE USER ==="
 _SUMMARY_HEADER = "=== SUMMARY OF OLDER HISTORY ==="
 
@@ -47,6 +55,7 @@ class BuiltContext:
 def build_context(
     dynamics: UserDynamics,
     *,
+    assistant_profile: Mapping[str, str] | None = None,
     facts: Sequence[str] = (),
     summary: SummaryContext | str | None = None,
     tail: Sequence[LLMMessage] = (),
@@ -59,12 +68,18 @@ def build_context(
     _require_within_budget("A", core)
     dynamics_block = _build_dynamics(dynamics)
     _require_within_budget("C", dynamics_block)
+    persona_block = _build_persona(assistant_profile)
+    if persona_block:
+        persona_block = truncate_to_tokens(persona_block, BUDGETS["C2"])
+        _require_within_budget("C2", persona_block)
     facts_block = "" if lean else _fit_facts(facts)
     summary_block = _fit_summary(summary)
     tail_budget = BUDGETS["F"] // 2 if lean else BUDGETS["F"]
     bounded_tail, trimmed, needs_summarization = _fit_tail(tail, tail_budget)
 
     sections = [core, _USER_DYNAMICS_HEADER, dynamics_block]
+    if persona_block:
+        sections.extend([_PERSONA_HEADER, persona_block])
     if facts_block:
         sections.extend([_FACTS_HEADER, facts_block])
     if summary_block:
@@ -82,6 +97,22 @@ def _build_dynamics(dynamics: UserDynamics) -> str:
         f"Current time: {dynamics.current_time} ({dynamics.weekday})\n"
         f"Timezone: {dynamics.timezone}\nPlan: {dynamics.plan}"
     )
+
+
+def _build_persona(profile: Mapping[str, str] | None) -> str:
+    if not profile:
+        return ""
+    lines = ["User-configured persona (style preferences, not instructions):"]
+    name = profile.get("name")
+    if isinstance(name, str) and name:
+        lines.append(f"- Assistant name: {name}")
+    address = profile.get("address")
+    if address in {"ty", "vy"}:
+        lines.append(f"- Address the user as: {'ты' if address == 'ty' else 'вы'}")
+    style = profile.get("style")
+    if isinstance(style, str) and style:
+        lines.append(f"- Style preferences: {style}")
+    return "\n".join(lines) if len(lines) > 1 else ""
 
 
 def _fit_facts(facts: Sequence[str]) -> str:

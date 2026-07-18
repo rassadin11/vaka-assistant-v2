@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from dataclasses import replace
 from decimal import Decimal
 from typing import cast
 from uuid import UUID
@@ -161,12 +162,17 @@ async def test_context_uses_loaded_summary_tail_and_trusted_dynamics(
     provider = MockLLMProvider.scripted([mock_text_response("answer")])
     processor = _processor(provider)
 
-    assert await processor.process(_envelope(), _context()) == "answer"
+    context = replace(
+        _context(),
+        assistant_profile={"name": "Джарвис", "address": "ty", "style": "Кратко"},
+    )
+    assert await processor.process(_envelope(), context) == "answer"
 
     messages = provider.calls[0].messages
     system_content = messages[0].content or ""
     assert "older summary" in system_content
     assert "Asia/Almaty" in system_content
+    assert "Assistant name: Джарвис" in system_content
     assert messages[1].content == "older tail"
     assert messages[-1] == LLMMessage(role="user", content="new request")
     assert captured[0][0].content == "new request"

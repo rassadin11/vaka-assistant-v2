@@ -28,6 +28,7 @@ users
   plan            text DEFAULT 'trial'       -- задел этапа 7
   paid_until      timestamptz                -- задел этапа 7
   timezone        text NOT NULL              -- IANA, задаётся при активации (2.9)
+  assistant_profile jsonb                    -- опц. персона ассистента (2026-07-18): {name?, address?: 'ty'|'vy', style?}; лимиты полей — спека assistant-persona-iteration-1
   created_at / updated_at
 RLS: id = current_setting('app.user_id')::uuid
 ```

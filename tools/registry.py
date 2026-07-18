@@ -15,6 +15,7 @@ from tools.clock import get_current_time
 from tools.documents import register_document_tools
 from tools.finance import SendPhoto, register_finance_tools
 from tools.memory import register_memory_tools
+from tools.persona import register_persona_tools
 from tools.reminders import register_reminder_tools
 from tools.scheduled import register_scheduled_task_tools
 from tools.web import CacheRedis, register_web_tools
@@ -72,6 +73,7 @@ def register_builtin_tools(
         )
         register_reminder_tools(registry, app_pool)
         register_scheduled_task_tools(registry, app_pool)
+        register_persona_tools(registry, app_pool)
         register_document_tools(registry, app_pool, embeddings)
         if embeddings is not None:
             register_memory_tools(registry, app_pool, embeddings)

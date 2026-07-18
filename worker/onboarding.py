@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from collections.abc import Awaitable
@@ -37,7 +38,8 @@ ASSISTANT_CAPABILITIES_TEXT = (
     "🌐 **Поиск в интернете** — «поищи, что нового у Яндекса». Такие ответы занимают чуть "
     "больше времени, чем обычные — я реально хожу по сайтам\n"
     "📄 **PDF-документы** — пришлите файл и задавайте вопросы по содержимому\n"
-    "🧠 **Память** — «запомни: у меня аллергия на арахис» — учту во всех будущих ответах\n\n"
+    "🧠 **Память** — «запомни: у меня аллергия на арахис» — учту во всех будущих ответах\n"
+    "🎭 **Персона** — «называй себя Джарвис», «общайся на ты» — имя и стиль сохранятся навсегда\n\n"
     "Календарь напоминаний и дашборд расходов — по кнопке меню слева от поля ввода."
 )
 WELCOME_TEXT = "Часовой пояс сохранён: {tz}. Всё готово 👌\n\n" + ASSISTANT_CAPABILITIES_TEXT
@@ -46,7 +48,9 @@ WELCOME_CTA_TEXT = (
     "«Потратил 300 на кофе»\n"
     "«Напомни завтра в 9 сделать зарядку»\n"
     "«Запомни: мою собаку зовут Бакс»\n\n"
-    "Не команда, а просто фраза — как написали бы другу. Если что-то пойдёт не так — "
+    "Не команда, а просто фраза — как написали бы другу.\n"
+    "А ещё мне можно дать имя и стиль: «называй себя Джарвис и общайся со мной на ты».\n"
+    "Если что-то пойдёт не так — "
     "/feedback <текст>: я в бете и учусь."
 )
 HELP_TEXT = (
@@ -183,6 +187,24 @@ class UserRow:
     status: str
     timezone: str
     plan: str
+    assistant_profile: dict[str, str] | None = None
+
+
+def _decode_assistant_profile(value: object) -> dict[str, str] | None:
+    if value is None:
+        return None
+    try:
+        decoded = json.loads(value) if isinstance(value, str) else value
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    profile = {
+        key: item
+        for key, item in decoded.items()
+        if key in {"name", "address", "style"} and isinstance(item, str)
+    }
+    return profile or None
 
 
 class OnboardingProcessor:
@@ -304,7 +326,8 @@ class OnboardingProcessor:
         async with service_transaction(self._service_pool) as connection:
             row = await connection.fetchrow(
                 """
-                SELECT id, tg_user_id, tg_chat_id, status, timezone, plan
+                SELECT id, tg_user_id, tg_chat_id, status, timezone, plan,
+                       assistant_profile::text AS assistant_profile
                 FROM users
                 WHERE tg_user_id = $1
                 """,
@@ -319,6 +342,7 @@ class OnboardingProcessor:
             status=row["status"],
             timezone=row["timezone"],
             plan=row["plan"],
+            assistant_profile=_decode_assistant_profile(row["assistant_profile"]),
         )
 
     async def _create_active_user(self, envelope: UpdateEnvelope) -> None:
@@ -368,6 +392,7 @@ class OnboardingProcessor:
             timezone=user.timezone,
             plan=user.plan,
             trace_id=envelope.trace_id,
+            assistant_profile=user.assistant_profile,
         )
         data = envelope.payload.get("data")
         if (

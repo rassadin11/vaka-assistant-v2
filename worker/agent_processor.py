@@ -164,6 +164,7 @@ class AgentProcessor:
         )
         built = build_context(
             _dynamics(context.timezone, context.plan),
+            assistant_profile=context.assistant_profile,
             facts=facts,
             summary=history.summary,
             tail=to_llm_messages(history.tail),
