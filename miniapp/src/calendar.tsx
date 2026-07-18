@@ -220,7 +220,7 @@ export function CalendarScreen({
     }
   }
 
-  if (state === "loading") return <CalendarState title="Загружаем календарь…" />;
+  if (state === "loading") return <CalendarSkeleton />;
   if (state === "offline") return <CalendarState title="Нет соединения" message="Проверьте интернет и попробуйте снова." retry={load} />;
   if (state === "unauthorized") return <CalendarState title="Сессия закончилась" message="Закройте и заново откройте Mini App." />;
   if (state === "error") return <CalendarState title="Не удалось загрузить" message={message} retry={load} />;
@@ -348,6 +348,28 @@ function TrashIcon() {
       <line x1="10" y1="11" x2="10" y2="17" />
       <line x1="14" y1="11" x2="14" y2="17" />
     </svg>
+  );
+}
+
+function CalendarSkeleton() {
+  const weekdays = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+  return (
+    <section class="calendar" aria-busy="true" aria-label="Загружаем календарь">
+      <header class="calendar-toolbar">
+        <span class="skeleton skeleton-btn" />
+        <span class="skeleton skeleton-title" />
+        <span class="skeleton skeleton-btn" />
+      </header>
+      <div class="month-grid">
+        {weekdays.map((day) => <span class="weekday" key={day}>{day}</span>)}
+        {Array.from({ length: 42 }, (_, index) => <span class="skeleton skeleton-cell" key={index} />)}
+      </div>
+      <section class="day-list">
+        <span class="skeleton skeleton-h3" />
+        <span class="skeleton skeleton-line" />
+        <span class="skeleton skeleton-line" />
+      </section>
+    </section>
   );
 }
 

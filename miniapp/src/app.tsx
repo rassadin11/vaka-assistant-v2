@@ -105,16 +105,44 @@ function Shell({
         <h1>{screen === "calendar" ? "Календарь" : "Финансы"}</h1>
         <p class="quiet">{me.timezone} · {me.plan}</p>
       </header>
-      <nav class="app-tabs" aria-label="Разделы Mini App">
-        <button type="button" class="nav-item" aria-current={screen === "calendar" ? "page" : undefined} onClick={() => setScreen("calendar")}>Календарь</button>
-        <button type="button" class="nav-item" aria-current={screen === "finance" ? "page" : undefined} onClick={() => setScreen("finance")}>Финансы</button>
-      </nav>
       {screen === "calendar" ? (
         <CalendarScreen token={token} timezone={me.timezone} refreshSession={refreshSession} />
       ) : (
         <FinanceScreen token={token} timezone={me.timezone} refreshSession={refreshSession} />
       )}
+      <nav class="app-tabs" aria-label="Разделы Mini App">
+        <div class="app-tabs-inner">
+          <button type="button" class="nav-item" aria-current={screen === "calendar" ? "page" : undefined} onClick={() => setScreen("calendar")}>
+            <CalendarTabIcon />
+            <span>Календарь</span>
+          </button>
+          <button type="button" class="nav-item" aria-current={screen === "finance" ? "page" : undefined} onClick={() => setScreen("finance")}>
+            <FinanceTabIcon />
+            <span>Финансы</span>
+          </button>
+        </div>
+      </nav>
     </main>
+  );
+}
+
+function CalendarTabIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="3" y="4.5" width="18" height="16.5" rx="2.5" />
+      <line x1="3" y1="9.5" x2="21" y2="9.5" />
+      <line x1="8" y1="2.5" x2="8" y2="6" />
+      <line x1="16" y1="2.5" x2="16" y2="6" />
+    </svg>
+  );
+}
+
+function FinanceTabIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M19 8V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2H6" />
+      <circle cx="16.5" cy="14" r="1.4" fill="currentColor" stroke="none" />
+    </svg>
   );
 }
 

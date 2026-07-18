@@ -288,13 +288,12 @@ export function FinanceScreen({
         openCustom={() => setPeriodKind("custom")}
         applyCustom={applyCustom}
       />
-      {state === "loading" ? <FinanceState title="Загружаем финансы…" /> : null}
+      {state === "loading" ? <FinanceSkeleton /> : null}
       {state === "offline" ? <FinanceState title="Нет соединения" message="Проверьте интернет и попробуйте снова." retry={load} /> : null}
       {state === "unauthorized" ? <FinanceState title="Сессия закончилась" message="Закройте и заново откройте Mini App." /> : null}
       {state === "error" ? <FinanceState title="Не удалось загрузить" message={message} retry={load} /> : null}
       {(state === "content" || state === "empty") && summary ? (
         <>
-          <AiSummaryCard state={aiState} text={aiText} />
           <SummaryCard data={summary} />
           {summary.by_category.length > 0 ? (
             <CategoryDonut data={summary} selected={category} onSelect={setCategory} />
@@ -304,7 +303,8 @@ export function FinanceScreen({
               × {categoryMeta[category].label}
             </button>
           ) : null}
-          {summary.by_bucket.length > 0 ? <BucketChart data={summary} /> : null}
+          {summary.by_bucket.length > 1 ? <BucketChart data={summary} /> : null}
+          <AiSummaryCard state={aiState} text={aiText} />
           {summary.budgets.length > 0 ? <Budgets data={summary} /> : null}
           {notice ? <p class="session-notice" role="status">{notice}</p> : null}
           {state === "empty" ? (
@@ -439,10 +439,11 @@ function BucketChart({ data }: { data: FinanceSummary }) {
   const buckets = data.by_bucket;
   const count = buckets.length;
   const maximum = Math.max(...buckets.map((item) => Number(item.expense)), 1);
-  const width = Math.max(count * 44, 300);
-  const padX = 24;
-  const baseY = 125;
-  const topY = 18;
+  const width = 340;
+  const height = 170;
+  const padX = 26;
+  const baseY = 132;
+  const topY = 24;
   const plotWidth = width - padX * 2;
   const pointX = (index: number) => (count === 1 ? width / 2 : padX + (plotWidth * index) / (count - 1));
   const pointY = (value: number) => baseY - (value / maximum) * (baseY - topY);
@@ -455,11 +456,11 @@ function BucketChart({ data }: { data: FinanceSummary }) {
   const area = count > 1
     ? `M ${round(points[0].x)},${baseY} ${points.map((point) => `L ${round(point.x)},${round(point.y)}`).join(" ")} L ${round(points[count - 1].x)},${baseY} Z`
     : "";
-  const labelStep = Math.ceil(count / 8);
+  const labelStep = Math.ceil(count / 6);
   const showValues = count <= 2;
   return <section class="finance-card bucket-card" aria-labelledby="bucket-title">
     <h2 id="bucket-title">Динамика расходов</h2>
-    <svg viewBox={`0 0 ${width} 160`} role="img" aria-label="График динамики расходов">
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="График динамики расходов" preserveAspectRatio="xMidYMid meet">
       <title>Расходы по времени</title>
       <defs>
         <linearGradient id="bucket-area-gradient" x1="0" y1="0" x2="0" y2="1">
@@ -470,9 +471,9 @@ function BucketChart({ data }: { data: FinanceSummary }) {
       {area ? <path class="bucket-area" d={area} /> : null}
       {count > 1 ? <polyline class="bucket-line" points={line} /> : null}
       {points.map((point, index) => <g>
-        <circle class="bucket-dot" cx={round(point.x)} cy={round(point.y)} r="3"><title>{point.item.bucket}: {rubles(point.item.expense)}</title></circle>
-        {showValues ? <text class="bucket-value" x={round(point.x)} y={round(point.y) - 9} text-anchor="middle">{rubles(point.item.expense)}</text> : null}
-        {index % labelStep === 0 || index === count - 1 ? <text x={round(point.x)} y="146" text-anchor="middle">{shortBucket(point.item.bucket)}</text> : null}
+        <circle class="bucket-dot" cx={round(point.x)} cy={round(point.y)} r="3.4"><title>{point.item.bucket}: {rubles(point.item.expense)}</title></circle>
+        {showValues ? <text class="bucket-value" x={round(point.x)} y={round(point.y) - 11} text-anchor="middle">{rubles(point.item.expense)}</text> : null}
+        {index % labelStep === 0 || index === count - 1 ? <text x={round(point.x)} y={height - 8} text-anchor="middle">{shortBucket(point.item.bucket)}</text> : null}
       </g>)}
     </svg>
     <ul class="visually-hidden" aria-label="Данные графика расходов">
@@ -538,6 +539,7 @@ function TransactionControls({
             <option value={value}>{categoryMeta[value].emoji} {categoryMeta[value].label}</option>
           ))}
         </select>
+        <span class="select-chevron" aria-hidden="true"><ChevronDownIcon /></span>
       </label>
       <button
         type="button"
@@ -558,13 +560,55 @@ function TransactionList({ items, deleting, remove }: { items: FinanceTransactio
       <div class="transaction-category" aria-hidden="true">{categoryMeta[item.category].emoji}</div>
       <div class="transaction-copy"><strong>{item.description || categoryMeta[item.category].label}</strong><span>{localDateTime(item.ts_local)} · {categoryMeta[item.category].label}</span></div>
       <span class={`transaction-amount amount-${item.direction}`}>{item.direction === "expense" ? "−" : "+"}{rubles(item.amount)}</span>
-      <button type="button" disabled={deleting !== null} onClick={() => void remove(item)}>{deleting === item.id ? "Удаляем…" : "Удалить"}</button>
+      <button type="button" class="transaction-delete" aria-label="Удалить транзакцию" aria-busy={deleting === item.id} disabled={deleting !== null} onClick={() => void remove(item)}><TrashIcon /></button>
     </li>)}</ul>
   </section>;
 }
 
 function FinanceState({ title, message, retry }: { title: string; message?: string; retry?: () => Promise<void> }) {
   return <section class="finance-state" aria-live="polite"><h2>{title}</h2>{message ? <p>{message}</p> : null}{retry ? <button type="button" onClick={() => void retry()}>Повторить</button> : null}</section>;
+}
+
+function FinanceSkeleton() {
+  return <div class="finance-skeleton" aria-busy="true" aria-label="Загружаем финансы">
+    <section class="finance-card">
+      <span class="skeleton skeleton-h2" />
+      <span class="skeleton skeleton-total" />
+    </section>
+    <section class="finance-card">
+      <span class="skeleton skeleton-h2" />
+      <span class="skeleton skeleton-donut" />
+    </section>
+    <section class="finance-card">
+      <span class="skeleton skeleton-h2" />
+      <span class="skeleton skeleton-chart" />
+    </section>
+    <section class="finance-card">
+      <span class="skeleton skeleton-h2" />
+      <span class="skeleton skeleton-row" />
+      <span class="skeleton skeleton-row" />
+      <span class="skeleton skeleton-row" />
+    </section>
+  </div>;
+}
+
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <line x1="10" y1="11" x2="10" y2="17" />
+      <line x1="14" y1="11" x2="14" y2="17" />
+    </svg>
+  );
+}
+
+function ChevronDownIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  );
 }
 
 function uniqueTransactions(items: FinanceTransaction[]): FinanceTransaction[] {

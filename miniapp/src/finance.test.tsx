@@ -24,7 +24,7 @@ const summary: FinanceSummary = {
   totals: { expense: "500.00", income: "1000.00" },
   prev_period: { expense: "600.00" },
   by_category: [{ category: "food", expense: "500.00", share: 1 }],
-  by_bucket: [{ bucket: "2026-07-17", expense: "500.00" }],
+  by_bucket: [{ bucket: "2026-07-16", expense: "300.00" }, { bucket: "2026-07-17", expense: "500.00" }],
   budgets: [{ category: "food", limit: "600.00", spent: "500.00", ratio: 0.8333 }]
 };
 
@@ -203,7 +203,7 @@ describe("FinanceScreen", () => {
     mount(api);
     await flushEffects();
 
-    const removeButton = button("Удалить");
+    const removeButton = deleteButton();
     removeButton.click();
     removeButton.click();
     expect(remove).toHaveBeenCalledTimes(1);
@@ -232,7 +232,7 @@ describe("FinanceScreen", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     mount(deleteClient, refreshDelete, "expired");
     await flushEffects();
-    button("Удалить").click();
+    deleteButton().click();
     await flushEffects();
 
     expect(remove).toHaveBeenCalledTimes(1);
@@ -262,6 +262,12 @@ function mount(
 function button(text: string): HTMLButtonElement {
   const found = [...document.querySelectorAll("button")].find((item) => item.textContent?.includes(text));
   if (!(found instanceof HTMLButtonElement)) throw new Error(`button not found: ${text}`);
+  return found;
+}
+
+function deleteButton(): HTMLButtonElement {
+  const found = document.querySelector('button[aria-label="Удалить транзакцию"]');
+  if (!(found instanceof HTMLButtonElement)) throw new Error("delete button not found");
   return found;
 }
 
