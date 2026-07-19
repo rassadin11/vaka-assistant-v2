@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from core.context_manager import BUDGETS, SummaryContext, UserDynamics, build_context
 from core.llm import LLMMessage, LLMToolCall
 from core.prompt import STATIC_CORE
@@ -74,6 +76,42 @@ def test_persona_section_is_hard_bounded_to_c2_budget() -> None:
     persona = content.split("=== ASSISTANT PERSONA ===\n\n", maxsplit=1)[1]
 
     assert count_tokens(persona) <= BUDGETS["C2"]
+
+
+@pytest.mark.parametrize(
+    ("gender", "expected_line"),
+    [
+        (
+            "female",
+            "- Grammatical gender for self-reference in Russian: feminine "
+            "(готова, записала, нашла)",
+        ),
+        (
+            "male",
+            "- Grammatical gender for self-reference in Russian: masculine (готов, записал, нашёл)",
+        ),
+        (
+            "neutral",
+            "- Grammatical gender for self-reference in Russian: neutral — avoid gendered "
+            "self-forms (использовать безличные формы: готово, записано)",
+        ),
+    ],
+)
+def test_persona_section_contains_exact_gender_line(gender: str, expected_line: str) -> None:
+    content = (
+        build_context(_dynamics(), assistant_profile={"gender": gender}).system_message.content
+        or ""
+    )
+
+    assert expected_line in content.splitlines()
+
+
+def test_persona_section_has_no_gender_line_when_gender_is_absent() -> None:
+    content = (
+        build_context(_dynamics(), assistant_profile={"name": "Алиса"}).system_message.content or ""
+    )
+
+    assert "Grammatical gender for self-reference in Russian" not in content
 
 
 def test_oversized_facts_are_dropped_from_the_end() -> None:

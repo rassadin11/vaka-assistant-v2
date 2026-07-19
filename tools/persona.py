@@ -25,10 +25,11 @@ class SetAssistantPersonaArgs(BaseModel):
     name: str | None = None
     address: Literal["ty", "vy"] | None = None
     style: str | None = None
+    gender: Literal["female", "male", "neutral"] | None = None
 
-    @field_validator("address", mode="before")
+    @field_validator("address", "gender", mode="before")
     @classmethod
-    def sanitize_address(cls, value: object) -> object:
+    def sanitize_literal(cls, value: object) -> object:
         """Normalize surrounding whitespace before strict literal validation."""
 
         return _sanitize_text(value) if isinstance(value, str) else value
@@ -58,7 +59,7 @@ def register_persona_tools(registry: ToolRegistry, app_pool: asyncpg.Pool) -> No
             name="set_assistant_persona",
             description=(
                 "Set or partially update the assistant's user-configured name, address form, "
-                "or communication style."
+                "grammatical gender, or communication style."
             ),
             args_schema=SetAssistantPersonaArgs,
             risk=RiskLevel.MUTATING_INTERNAL,
@@ -89,6 +90,8 @@ async def _set_assistant_persona(
         updates["address"] = args.address
     if "style" in args.model_fields_set:
         updates["style"] = _sanitize_text(args.style)
+    if "gender" in args.model_fields_set:
+        updates["gender"] = args.gender
 
     name = updates.get("name")
     if name is not None and len(name) > MAX_PERSONA_NAME_LENGTH:
@@ -142,8 +145,12 @@ def _decode_profile(value: object) -> dict[str, str]:
     decoded = json.loads(value) if isinstance(value, str) else value
     if not isinstance(decoded, dict):
         return {}
-    return {
+    profile = {
         key: item
         for key, item in decoded.items()
         if key in {"name", "address", "style"} and isinstance(item, str)
     }
+    gender = decoded.get("gender")
+    if isinstance(gender, str) and gender in {"female", "male", "neutral"}:
+        profile["gender"] = gender
+    return profile

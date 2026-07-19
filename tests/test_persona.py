@@ -16,6 +16,7 @@ from tests.test_tools import FakeRedis
 from tools.persona import (
     SetAssistantPersonaArgs,
     _clear_assistant_persona,
+    _decode_profile,
     _set_assistant_persona,
     register_persona_tools,
 )
@@ -132,6 +133,35 @@ async def test_explicit_null_removes_only_that_persona_field() -> None:
     assert pool.connection.profile == {"address": "ty", "style": "Кратко"}
 
 
+async def test_gender_partial_update_preserves_other_persona_fields() -> None:
+    pool = FakePersonaPool({"name": "Алиса", "address": "vy", "style": "Кратко"})
+
+    await _set_assistant_persona(
+        pool,
+        _context(),
+        SetAssistantPersonaArgs(gender="female"),
+    )
+
+    assert pool.connection.profile == {
+        "name": "Алиса",
+        "address": "vy",
+        "style": "Кратко",
+        "gender": "female",
+    }
+
+
+async def test_explicit_null_removes_only_gender() -> None:
+    pool = FakePersonaPool({"name": "Алиса", "gender": "female"})
+
+    await _set_assistant_persona(
+        pool,
+        _context(),
+        SetAssistantPersonaArgs(gender=None),
+    )
+
+    assert pool.connection.profile == {"name": "Алиса"}
+
+
 @pytest.mark.parametrize(
     ("args", "message"),
     [
@@ -157,6 +187,17 @@ def test_set_persona_address_is_strict() -> None:
     assert SetAssistantPersonaArgs.model_validate({"address": "  ty\r\n"}).address == "ty"
     with pytest.raises(ValidationError):
         SetAssistantPersonaArgs.model_validate({"address": "them"})
+
+
+def test_set_persona_gender_is_sanitized_and_strict() -> None:
+    assert SetAssistantPersonaArgs.model_validate({"gender": "  female\r\n"}).gender == "female"
+    with pytest.raises(ValidationError):
+        SetAssistantPersonaArgs.model_validate({"gender": "feminine"})
+
+
+@pytest.mark.parametrize("gender", ["invalid", ["female"], 1, None])
+def test_decode_profile_drops_invalid_stored_gender(gender: object) -> None:
+    assert _decode_profile({"name": "Алиса", "gender": gender}) == {"name": "Алиса"}
 
 
 async def test_clear_persona_sets_profile_to_null() -> None:

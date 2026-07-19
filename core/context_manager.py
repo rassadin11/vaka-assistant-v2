@@ -109,6 +109,20 @@ def _build_persona(profile: Mapping[str, str] | None) -> str:
     address = profile.get("address")
     if address in {"ty", "vy"}:
         lines.append(f"- Address the user as: {'ты' if address == 'ty' else 'вы'}")
+    gender = profile.get("gender")
+    if gender == "female":
+        lines.append(
+            "- Grammatical gender for self-reference in Russian: feminine (готова, записала, нашла)"
+        )
+    elif gender == "male":
+        lines.append(
+            "- Grammatical gender for self-reference in Russian: masculine (готов, записал, нашёл)"
+        )
+    elif gender == "neutral":
+        lines.append(
+            "- Grammatical gender for self-reference in Russian: neutral — avoid gendered "
+            "self-forms (использовать безличные формы: готово, записано)"
+        )
     style = profile.get("style")
     if isinstance(style, str) and style:
         lines.append(f"- Style preferences: {style}")

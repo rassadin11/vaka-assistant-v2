@@ -143,13 +143,18 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     "set_assistant_persona": ToolDefinition(
         name="set_assistant_persona",
         description=(
-            "Set or partially update the assistant's name, address form, or communication style."
+            "Set or partially update the assistant's name, address form, grammatical gender, "
+            "or communication style."
         ),
         parameters=_object(
             {
                 "name": {"type": ["string", "null"]},
                 "address": {"type": ["string", "null"], "enum": ["ty", "vy", None]},
                 "style": {"type": ["string", "null"]},
+                "gender": {
+                    "type": ["string", "null"],
+                    "enum": ["female", "male", "neutral", None],
+                },
             }
         ),
     ),
@@ -245,6 +250,19 @@ def _no_tool(
         return True, "correct text-only answer"
 
     return check
+
+
+def _feminine_self_reference(response: LLMResponse) -> tuple[bool, str]:
+    if response.message.tool_calls:
+        return False, "unexpected tool call"
+    text = (response.message.content or "").lower()
+    feminine_forms = ("записала", "готова", "добавила", "сохранила", "нашла")
+    if not any(form in text for form in feminine_forms):
+        return False, f"missing feminine self-reference: {feminine_forms}"
+    masculine_pattern = r"\b(записал|готов|добавил|сохранил|нашёл)\b"
+    if re.search(masculine_pattern, text):
+        return False, "contains masculine self-reference"
+    return True, "correct feminine text-only answer"
 
 
 def _pending_messages(
@@ -723,6 +741,11 @@ def build_scenarios(prompt_version: str = "v1") -> list[Scenario]:
         },
         prompt_version=prompt_version,
     ).system_message
+    gender_persona_system = build_context(
+        _DYNAMICS,
+        assistant_profile={"name": "Алиса", "gender": "female"},
+        prompt_version=prompt_version,
+    ).system_message
     scenarios.extend(
         [
             Scenario(
@@ -737,6 +760,56 @@ def build_scenarios(prompt_version: str = "v1") -> list[Scenario]:
                 ),
                 _tools("set_assistant_persona"),
                 _tool_check("set_assistant_persona", name="Джарвис", address="ty"),
+            ),
+            Scenario(
+                "persona-set-gender",
+                "Set the assistant name and grammatical gender from a natural-language request.",
+                _messages(
+                    LLMMessage(role="user", content="Называй себя Алиса, ты девушка"),
+                    system_message=system_message,
+                ),
+                _tools("set_assistant_persona"),
+                _tool_check("set_assistant_persona", name="Алиса", gender="female"),
+            ),
+            Scenario(
+                "persona-gender-after-tool",
+                "Use feminine first-person forms after a successful transaction tool result.",
+                [
+                    gender_persona_system,
+                    LLMMessage(role="user", content="Потратил 300 рублей на кофе"),
+                    LLMMessage(
+                        role="assistant",
+                        tool_calls=[
+                            LLMToolCall(
+                                id="persona-gender-tx-1",
+                                name="add_transaction",
+                                arguments_json=(
+                                    '{"amount":300,"direction":"expense",'
+                                    '"category":"food","description":"кофе"}'
+                                ),
+                            )
+                        ],
+                    ),
+                    LLMMessage(
+                        role="tool",
+                        tool_call_id="persona-gender-tx-1",
+                        content=(
+                            '{"status":"ok","payload":{"category":"food","today_total":"300.00"}}'
+                        ),
+                    ),
+                ],
+                _tools("add_transaction"),
+                _feminine_self_reference,
+            ),
+            Scenario(
+                "persona-gender-normal",
+                "Use feminine first-person forms in an ordinary answer.",
+                [
+                    gender_persona_system,
+                    LLMMessage(role="user", content="Ты готова взяться за мои финансы?"),
+                ],
+                _tools(),
+                _feminine_self_reference,
             ),
             Scenario(
                 "persona-follow-normal",
@@ -814,8 +887,8 @@ def build_scenarios(prompt_version: str = "v1") -> list[Scenario]:
             ),
         ]
     )
-    if len(scenarios) != 39:
-        raise RuntimeError("Prompt evaluation suite must contain exactly 39 scenarios.")
+    if len(scenarios) != 42:
+        raise RuntimeError("Prompt evaluation suite must contain exactly 42 scenarios.")
     return scenarios
 
 
