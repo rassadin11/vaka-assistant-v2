@@ -494,10 +494,6 @@ def test_onboarding_persona_copy_is_exact_and_ordered() -> None:
         "🎭 **Персона** — «называй себя Ася, ты девушка», «общайся на ты» или «называй себя "
         "Михаил, общаемся официально» — имя и стиль сохранятся навсегда"
     )
-    persona_cta = (
-        "А ещё мне можно дать имя и стиль: «называй себя Джарвис и общайся со мной на ты»."
-    )
-
     assert persona_bullet in ASSISTANT_CAPABILITIES_TEXT
     assert ASSISTANT_CAPABILITIES_TEXT.index(persona_bullet) < (
         ASSISTANT_CAPABILITIES_TEXT.index("🧠 **Память**")
@@ -505,5 +501,4 @@ def test_onboarding_persona_copy_is_exact_and_ordered() -> None:
     assert ASSISTANT_CAPABILITIES_TEXT.index(persona_bullet) < (
         ASSISTANT_CAPABILITIES_TEXT.index("Календарь напоминаний")
     )
-    assert persona_cta in WELCOME_CTA_TEXT
-    assert WELCOME_CTA_TEXT.index(persona_cta) < WELCOME_CTA_TEXT.index("/feedback")
+    assert "имя и стиль" not in WELCOME_CTA_TEXT
