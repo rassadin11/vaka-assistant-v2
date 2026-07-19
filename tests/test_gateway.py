@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 import pytest
-from aiogram.types import MenuButtonWebApp
+from aiogram.types import BotCommand, MenuButtonWebApp
 
 from core.envelope import UpdateEnvelope
 from core.queue import QueueName, RedisSettings
@@ -60,6 +60,37 @@ async def test_set_menu_button_uses_public_mini_app_url(
     assert fake_bot.menu_button is not None
     assert fake_bot.menu_button.text == "Открыть"
     assert fake_bot.menu_button.web_app.url == "https://assistant.example/app/"
+    assert fake_bot.session.closed
+
+
+async def test_set_my_commands_publishes_user_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSession:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FakeBot:
+        def __init__(self) -> None:
+            self.session = FakeSession()
+            self.commands: list[BotCommand] | None = None
+
+        async def set_my_commands(self, commands: list[BotCommand]) -> None:
+            self.commands = commands
+
+    fake_bot = FakeBot()
+    monkeypatch.setattr(gateway_main, "telegram_bot_token", lambda: "test-token")
+    monkeypatch.setattr(gateway_main, "Bot", lambda _token: fake_bot)
+
+    await gateway_main._set_my_commands()
+
+    assert fake_bot.commands is not None
+    assert [c.command for c in fake_bot.commands] == ["start", "help", "feedback"]
+    assert all(c.description for c in fake_bot.commands)
+    assert "reject" not in [c.command for c in fake_bot.commands]
     assert fake_bot.session.closed
 
 

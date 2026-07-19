@@ -10,7 +10,7 @@ from typing import NoReturn
 
 import uvicorn
 from aiogram import Bot, Dispatcher
-from aiogram.types import MenuButtonWebApp, Update, WebAppInfo
+from aiogram.types import BotCommand, MenuButtonWebApp, Update, WebAppInfo
 from redis.asyncio import Redis
 
 from core.logging_setup import setup_logging
@@ -36,6 +36,9 @@ def main() -> NoReturn:
         raise SystemExit(0)
     if command == "set-menu-button":
         asyncio.run(_set_menu_button())
+        raise SystemExit(0)
+    if command == "set-my-commands":
+        asyncio.run(_set_my_commands())
         raise SystemExit(0)
     raise SystemExit(f"unknown gateway command: {command}")
 
@@ -105,6 +108,20 @@ async def _set_menu_button() -> None:
                 text="Открыть",
                 web_app=WebAppInfo(url=f"{public_url.rstrip('/')}/app/"),
             )
+        )
+    finally:
+        await bot.session.close()
+
+
+async def _set_my_commands() -> None:
+    bot = Bot(telegram_bot_token())
+    try:
+        await bot.set_my_commands(
+            [
+                BotCommand(command="start", description="Начать работу с ассистентом"),  # noqa: RUF001
+                BotCommand(command="help", description="Что умеет ассистент"),
+                BotCommand(command="feedback", description="Отправить отзыв разработчику"),
+            ]
         )
     finally:
         await bot.session.close()

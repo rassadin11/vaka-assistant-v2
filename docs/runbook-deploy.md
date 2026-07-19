@@ -94,6 +94,55 @@ ssh deploy@31.76.15.130 sudo docker run --rm --network personal-assistant-prod_d
 
 Проверка: `getWebhookInfo` токеном бота — url `https://vaka-assistant.ru/webhook/…`, `last_error_message` пуст.
 
+## Подсказки команд («/» в чате)
+
+Ставится один раз (и после изменения списка команд в `gateway/__main__.py::_set_my_commands`):
+
+```bash
+ssh deploy@31.76.15.130 sudo docker run --rm --network personal-assistant-prod_default \
+  --env-file /etc/assistant/bootstrap.env ghcr.io/rassadin11/vaka-assistant-v2:latest \
+  python -m core.secrets_entrypoint -- python -m gateway set-my-commands
+```
+
+Проверка: `getMyCommands` токеном бота → start/help/feedback; в чате при вводе «/» появляется список.
+
+## Mini App (webapp) — одноразовая активация на проде
+
+Выполнено 2026-07-18. После этого штатные деплои поднимают webapp автоматически (он в
+`compose.prod.yml`). Одноразовые шаги (с машины владельца, SSH к VPS):
+
+0. **SSH через MantaRay VPN**: прямой SSH виснет на banner exchange (fakedns). Временный
+   статический маршрут в admin-PowerShell: `route add 31.76.15.130 mask 255.255.255.255
+   <phys_gateway> if <phys_ifindex>` (шлюз/ifindex физ-адаптера из `Get-NetIPConfiguration | ?
+   {$_.IPv4DefaultGateway}`; подробности — memory `machine-and-workflow-quirks`). Ansible и docker
+   команды к серверу работают и из контейнера (host route действует на egress).
+1. **Инфраструктура (Ansible)** — раздел «Изменения инфраструктуры» выше: роль `app` раскладывает
+   webapp в compose, Caddy `/app/*`, Prometheus target и ПУСТОЙ `webapp.env` (force:false). Стек НЕ
+   рестартит — безопасно, бот не падает. Прогнать дважды (2-й = changed=0).
+2. **Секрет + identity webapp** (bootstrap **новым** образом — старый не знает webapp в
+   SERVICE_NAMES): добавить `WEBAPP_SESSION_SECRET` в `/etc/assistant/prod-seed.env`
+   (`openssl rand -hex 32`, идемпотентно), затем bootstrap (раздел «Секреты») с
+   `BOOTSTRAP_SEED_KEYS=WEBAPP_SESSION_SECRET` и образом `sha-<new>` — создаёт identity `webapp`,
+   существующие gateway/worker/scheduler сохраняет, `bootstrap.env` не трогает.
+3. **Заполнить `/etc/assistant/webapp.env`**: `INFISICAL_URL/PROJECT_ID/ENV` — из `bootstrap.env`;
+   `INFISICAL_CLIENT_ID/SECRET` — из `infisical-prod.env` (`WEBAPP_INFISICAL_CLIENT_ID/SECRET`);
+   плюс `REDIS_QUEUE_URL=redis://redis-queue:6379/0`. Права root:deploy 0640.
+4. **Деплой** (штатный, разделы выше): pin нового образа → pull → миграция → `systemctl restart
+   assistant` → webapp поднимается вместе со стеком.
+5. **Кнопка меню бота** (аналог set-webhook):
+
+```bash
+ssh deploy@31.76.15.130 sudo docker run --rm --network personal-assistant-prod_default \
+  --env-file /etc/assistant/bootstrap.env ghcr.io/rassadin11/vaka-assistant-v2:latest \
+  python -m core.secrets_entrypoint -- python -m gateway set-menu-button
+```
+
+Проверка: `getChatMenuButton` → `type: web_app`, url `https://vaka-assistant.ru/app/` (появляется
+через несколько секунд — propagation; сразу после set может ещё показывать `commands`).
+
+6. Проверка: `https://vaka-assistant.ru/app/healthz`=200, `/app/` отдаёт SPA,
+   `/app/api/unknown`→JSON 404, все контейнеры healthy; живой вход из Telegram владельцем.
+
 ## Диагностика
 
 ```bash
