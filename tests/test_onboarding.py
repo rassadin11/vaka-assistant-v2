@@ -491,15 +491,16 @@ async def test_active_user_context_uses_the_already_resolved_user_row() -> None:
 
 def test_onboarding_persona_copy_is_exact_and_ordered() -> None:
     persona_bullet = (
-        "🎭 **Персона** — «называй себя Джарвис», «общайся на ты» — имя и стиль сохранятся навсегда"
+        "🎭 **Персона** — «называй себя Ася, ты девушка», «общайся на ты» или «называй себя "
+        "Михаил, общаемся официально» — имя и стиль сохранятся навсегда"
     )
     persona_cta = (
         "А ещё мне можно дать имя и стиль: «называй себя Джарвис и общайся со мной на ты»."
     )
 
     assert persona_bullet in ASSISTANT_CAPABILITIES_TEXT
-    assert ASSISTANT_CAPABILITIES_TEXT.index("🧠 **Память**") < (
-        ASSISTANT_CAPABILITIES_TEXT.index(persona_bullet)
+    assert ASSISTANT_CAPABILITIES_TEXT.index(persona_bullet) < (
+        ASSISTANT_CAPABILITIES_TEXT.index("🧠 **Память**")
     )
     assert ASSISTANT_CAPABILITIES_TEXT.index(persona_bullet) < (
         ASSISTANT_CAPABILITIES_TEXT.index("Календарь напоминаний")
