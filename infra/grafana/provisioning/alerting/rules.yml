@@ -18,7 +18,8 @@ groups:
             datasourceUid: prometheus
             model:
               editorMode: code
-              expr: sum(queue_depth{queue="interactive"}) > 100
+              # max, not sum: every worker exports the same global queue depth.
+              expr: max(queue_depth{queue="interactive"}) > 100
               instant: true
               interval: ""
               intervalMs: 1000

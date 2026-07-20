@@ -69,7 +69,7 @@ docker exec personal-assistant-dev-redis-queue-1 redis-cli XRANGE q:dlq - + COUN
 
 По каждой записи: смотреть `error`/`trace_id`, причину чинить; переигровка — отправить пользователю просьбу повторить запрос (автоматической переигровки из DLQ нет, ключ идемпотентности защитит от дублей side-effect'ов); мусорные записи списывать `XDEL q:dlq <id>`.
 
-Проверка: `sum(queue_depth{queue="interactive"})` в Prometheus вернулась к ~0, алерт resolved.
+Проверка: `max(queue_depth{queue="interactive"})` в Prometheus вернулась к ~0, алерт resolved.
 
 ## 3. Недоступность LLM API — алерт `LLM429RatioHigh`, Telegram-алерты circuit breaker
 
