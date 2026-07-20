@@ -8,17 +8,20 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from core.context import TaskContext
 from core.envelope import UpdateEnvelope
 from worker.onboarding import (
     ALREADY_ACTIVE_TEXT,
     ASSISTANT_CAPABILITIES_TEXT,
+    CITY_TZ,
     HELP_TEXT,
     REJECTED_TEXT,
     START_TIMEZONE_PROMPT_TEXT,
     TIMEZONE_BUTTONS,
     UNKNOWN_CITY_TEXT,
+    VALID_TIMEZONES,
     WELCOME_CTA_TEXT,
     WELCOME_TEXT,
     OnboardingProcessor,
@@ -491,14 +494,61 @@ async def test_active_user_context_uses_the_already_resolved_user_row() -> None:
 
 def test_onboarding_persona_copy_is_exact_and_ordered() -> None:
     persona_bullet = (
-        "🎭 **Персона** — «называй себя Ася, ты девушка», «общайся на ты» или «называй себя "
-        "Михаил, общаемся официально» — имя и стиль сохранятся навсегда"
+        "🎭 Настройте меня как «**Личность**» — «называй себя Ася, ты девушка», «общайся на ты» "
+        "или «называй себя Михаил, общаемся официально» — имя и стиль сохранятся навсегда"
     )
     assert persona_bullet in ASSISTANT_CAPABILITIES_TEXT
     assert ASSISTANT_CAPABILITIES_TEXT.index(persona_bullet) < (
-        ASSISTANT_CAPABILITIES_TEXT.index("🧠 **Память**")
+        ASSISTANT_CAPABILITIES_TEXT.index("🧠 У меня есть «**Память**»")
     )
     assert ASSISTANT_CAPABILITIES_TEXT.index(persona_bullet) < (
         ASSISTANT_CAPABILITIES_TEXT.index("Календарь напоминаний")
     )
     assert "имя и стиль" not in WELCOME_CTA_TEXT
+
+
+def test_timezone_buttons_cover_every_russian_zone_with_moscow_offsets() -> None:
+    buttons = [button for row in TIMEZONE_BUTTONS for button in row]
+    zones = [callback.removeprefix("tz:") for _label, callback in buttons]
+    assert zones[-1] == "other"
+
+    russian_zones = zones[:-1]
+    assert russian_zones == [
+        "Europe/Kaliningrad",
+        "Europe/Moscow",
+        "Europe/Samara",
+        "Asia/Yekaterinburg",
+        "Asia/Omsk",
+        "Asia/Krasnoyarsk",
+        "Asia/Irkutsk",
+        "Asia/Yakutsk",
+        "Asia/Vladivostok",
+        "Asia/Magadan",
+        "Asia/Kamchatka",
+    ]
+    assert all(zone in VALID_TIMEZONES for zone in russian_zones)
+
+    winter = datetime(2026, 1, 15, 12, tzinfo=UTC)
+    moscow_offset = winter.astimezone(ZoneInfo("Europe/Moscow")).utcoffset()
+    assert moscow_offset is not None
+    for label, callback in buttons[:-1]:
+        offset = winter.astimezone(ZoneInfo(callback.removeprefix("tz:"))).utcoffset()
+        assert offset is not None
+        hours = round((offset - moscow_offset).total_seconds() / 3600)
+        expected = "МСК" if hours == 0 else f"МСК{hours:+d}"
+        assert label.split(" · ")[0] == expected, label
+
+
+def test_timezone_text_fallback_maps_known_cities_to_valid_zones() -> None:
+    assert set(CITY_TZ.values()) <= VALID_TIMEZONES
+    assert all(city == city.strip().lower() for city in CITY_TZ)
+    button_zones = {
+        callback.removeprefix("tz:")
+        for row in TIMEZONE_BUTTONS
+        for _label, callback in row
+        if callback != "tz:other"
+    }
+    assert button_zones <= set(CITY_TZ.values())
+    # CIS cities lost their buttons, so the text fallback must still resolve them.
+    assert CITY_TZ["минск"] == "Europe/Minsk"
+    assert CITY_TZ["алматы"] == "Asia/Almaty"
