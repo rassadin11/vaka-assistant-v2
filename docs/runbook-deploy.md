@@ -104,7 +104,7 @@ ssh deploy@31.76.15.130 sudo docker run --rm --network personal-assistant-prod_d
   python -m core.secrets_entrypoint -- python -m gateway set-my-commands
 ```
 
-Проверка: `getMyCommands` токеном бота → start/help/feedback; в чате при вводе «/» появляется список.
+Проверка: `getMyCommands` токеном бота → start/help/feedback/timezone; в чате при вводе «/» появляется список.
 
 ## Mini App (webapp) — одноразовая активация на проде
 
