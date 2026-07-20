@@ -1,6 +1,6 @@
 # Runbook — что делать при инцидентах
 
-Для оператора сервиса (сегодня — владелец). Формат каждого сценария: симптом/алерт → диагностика → действия → проверка. Все команды рабочие для dev-стека (Windows, Git Bash, из корня репозитория); prod-варианты (systemd, Ansible, боевые хосты) дописываются на этапе 1B — такие места помечены **[prod: 1B]**.
+Для оператора сервиса (сегодня — владелец). Формат каждого сценария: симптом/алерт → диагностика → действия → проверка. Все команды рабочие для dev-стека (Windows, Git Bash, из корня репозитория); prod-варианты (systemd, Ansible, боевые хосты) — в [runbook-deploy.md](runbook-deploy.md) (карта прода, деплой/откат, секреты, диагностика на сервере); места, где команда отличается на проде, помечены **[prod: 1B]**.
 
 ## 0. Где смотреть
 
@@ -48,10 +48,11 @@ docker exec personal-assistant-dev-redis-queue-1 redis-cli XPENDING q:interactiv
 Диагностика — где скопилось и почему:
 
 ```bash
-# глубина по всем партициям interactive
-for i in $(seq 0 15); do docker exec personal-assistant-dev-redis-queue-1 redis-cli XLEN q:interactive:$i; done
+# реальный бэклог по партициям: в выводе XINFO GROUPS смотреть lag (не доставлено) + pending (не заACKнуто)
+for i in $(seq 0 15); do docker exec personal-assistant-dev-redis-queue-1 redis-cli XINFO GROUPS q:interactive:$i; done
 # зависшие в обработке (не заACKнутые)
 docker exec personal-assistant-dev-redis-queue-1 redis-cli XPENDING q:interactive:0 g:interactive
+# XLEN — НЕ бэклог: записи после ACK не удаляются, это счётчик всех сообщений за историю (до trim 100k)
 ```
 
 Причины и действия:
@@ -106,7 +107,8 @@ docker logs personal-assistant-dev-searxng-1 --since 10m | tail -20
 
 - **searxng** — web_search возвращает понятный отказ, остальное работает. Не критично, чинить в рабочем порядке.
 - **embeddings** (severity warning) — профиль `ml`: в dev контейнер может быть просто не запущен (`docker compose -f infra/docker-compose.dev.yml --profile ml up -d embeddings`). Без него не работают память (remember_fact/автоинжект) и поиск по документам — задачи продолжают отвечать без них.
-- **postgres** — критично: не работает ничего (диалоги, RLS, инструменты). Если контейнер не поднимается или данные повреждены — сценарий 5.
+- **webapp** (Mini App) — бот работает без него; из Telegram не открываются экраны «Календарь»/«Финансы». Проверка: `/app/healthz` (прод: `https://vaka-assistant.ru/app/healthz`, ожидается 200); контейнер `webapp` в стеке — `docker restart` при зависании; ошибки — в JSON-логах контейнера по `trace_id`. Прод-диагностика — runbook-deploy.md.
+- **postgres** — критично: не работает ничего (диалоги, RLS, инструменты, Mini App). Если контейнер не поднимается или данные повреждены — сценарий 5.
 - Если весь стек лёг (перезагрузка машины, рестарт Docker Desktop): `make dev-up` поднимает всё; зависшие контейнеры в статусе Created — `docker rm` и повторить.
 
 ## 5. Восстановление из бэкапа

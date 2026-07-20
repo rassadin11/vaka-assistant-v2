@@ -7,6 +7,7 @@ from collections.abc import Iterator
 import httpx
 import pytest
 from prometheus_client import CollectorRegistry, generate_latest
+from redis.exceptions import ResponseError
 
 from core.metrics import active_metrics, configure_metrics, install_metrics
 from core.queue import RedisSettings, stream_key
@@ -31,11 +32,27 @@ def metric_registry() -> Iterator[CollectorRegistry]:
 class FakeQueueRedis:
     """Tiny queue client for gateway and queue-depth tests."""
 
+    def __init__(self) -> None:
+        self.xinfo_group_calls: list[str] = []
+
     async def ping(self) -> bool:
         return True
 
-    async def xlen(self, key: str) -> int:
-        return 2 if key.endswith(":0") else 0
+    async def xinfo_groups(self, key: str) -> list[dict[object, object]]:
+        self.xinfo_group_calls.append(key)
+        if key == "q:interactive:0":
+            return [{"name": "g:interactive", "pending": 2, "lag": 3}]
+        if key == "q:interactive:1":
+            return [{b"name": b"g:interactive", b"pending": b"4", b"lag": None}]
+        if key == "q:interactive:2":
+            raise ResponseError("no such key")
+        if key == "q:interactive:3":
+            return [{"name": "g:unrelated", "pending": 100, "lag": 100}]
+        if key == "q:background:0":
+            return [{"name": "g:background", "pending": 1, "lag": 2}]
+        if key == "q:background:1":
+            return [{b"name": b"g:background", b"pending": b"5", b"lag": b"4"}]
+        return []
 
 
 class FakeCacheRedis:
@@ -50,7 +67,14 @@ class FakeCacheRedis:
     async def eval(self, _script: str, _numkeys: int, *_args: object) -> list[int]:
         return [1, 0]
 
-    async def set(self, _name: str, _value: str, **_kwargs: object) -> bool:
+    async def set(
+        self,
+        name: str,
+        value: str,
+        *,
+        ex: int | None = None,
+        nx: bool = False,
+    ) -> bool:
         return True
 
 
@@ -142,11 +166,13 @@ async def test_gateway_metrics_endpoint_returns_prometheus_exposition(
 
 
 async def test_queue_depth_collector_sums_all_streams(metric_registry: CollectorRegistry) -> None:
-    await collect_queue_depths(FakeQueueRedis())  # type: ignore[arg-type]
+    queue_redis = FakeQueueRedis()
+    await collect_queue_depths(queue_redis)  # type: ignore[arg-type]
 
     exposition = generate_latest(metric_registry).decode()
-    assert 'queue_depth{queue="interactive"} 2.0' in exposition
-    assert 'queue_depth{queue="background"} 2.0' in exposition
+    assert 'queue_depth{queue="interactive"} 9.0' in exposition
+    assert 'queue_depth{queue="background"} 12.0' in exposition
+    assert len(queue_redis.xinfo_group_calls) == 32
     assert stream_key("interactive", 0) == "q:interactive:0"
 
 

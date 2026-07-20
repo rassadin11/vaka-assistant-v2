@@ -9,4 +9,4 @@ contactPoints:
         settings:
           bottoken: $TELEGRAM_ALERT_BOT_TOKEN
           chatid: $TELEGRAM_ALERT_CHAT_ID
-          message: "{{ range .Alerts }}{{ .Labels.alertname }}: {{ .Status }}, значение: {{ .ValueString }}{{ end }}"
+          message: "{{ range .Alerts }}[{{ .Status }}] {{ .Annotations.summary }}\n{{ end }}"

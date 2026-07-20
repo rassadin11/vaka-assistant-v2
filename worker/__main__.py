@@ -25,6 +25,7 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from prometheus_client import start_http_server
 from redis.asyncio import Redis
+from redis.exceptions import ResponseError
 
 from core.agent import AgentLoopConfig
 from core.config import admin_ids_from_env, optional_telegram_bot_token
@@ -38,7 +39,7 @@ from core.logging_setup import setup_logging
 from core.metrics import active_metrics
 from core.model_router import RouteRequest, StaticModelRouter
 from core.prompt import prompt_version_for_model
-from core.queue import enqueue, redis_settings_from_env, stream_keys
+from core.queue import CONSUMER_GROUPS, enqueue, redis_settings_from_env, stream_keys
 from core.registry_dispatcher import RegistryToolDispatcher
 from core.secrets import EnvSecretsProvider, SecretNotFoundError
 from core.stt import GroqSTTProvider, STTProvider
@@ -252,12 +253,45 @@ def start_worker_metrics_server() -> None:
 
 
 async def collect_queue_depths(queue_redis: Redis) -> None:
-    """Sum Redis Stream lengths for every partition of each worker queue."""
+    """Sum undelivered and pending entries for every worker queue partition."""
 
     metrics = active_metrics()
     for queue in ("interactive", "background"):
-        lengths = await asyncio.gather(*(queue_redis.xlen(key) for key in stream_keys(queue)))
-        metrics.queue_depth.labels(queue=queue).set(sum(int(length) for length in lengths))
+        depths = await asyncio.gather(
+            *(
+                _stream_queue_depth(queue_redis, key, CONSUMER_GROUPS[queue])
+                for key in stream_keys(queue)
+            )
+        )
+        metrics.queue_depth.labels(queue=queue).set(sum(depths))
+
+
+async def _stream_queue_depth(queue_redis: Redis, stream: str, group_name: str) -> int:
+    try:
+        groups = cast("list[dict[object, object]]", await queue_redis.xinfo_groups(stream))
+    except ResponseError as exc:
+        if "no such key" in str(exc).lower():
+            return 0
+        raise
+
+    for group in groups:
+        raw_name = group.get("name", group.get(b"name"))
+        if _redis_text(raw_name) != group_name:
+            continue
+        pending = group.get("pending", group.get(b"pending"))
+        lag = group.get("lag", group.get(b"lag"))
+        return _redis_int(pending) + _redis_int(lag)
+    return 0
+
+
+def _redis_text(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+def _redis_int(value: object) -> int:
+    return 0 if value is None else int(cast("str | bytes | int", value))
 
 
 async def _queue_depth_collector(queue_redis: Redis) -> None:
