@@ -155,7 +155,15 @@ docker exec personal-assistant-prod-postgres-1 psql -U assistant -d assistant \
   -c "select tool_name, result_status, latency_ms, created_at from tool_calls_log order by id desc limit 10"
 ```
 
-Grafana — `https://vaka-assistant.ru/grafana/` (алерты и так приходят в канал владельца).
+Grafana наружу НЕ выведена (Caddy проксирует только webhook и Mini App; проверено 2026-07-20) — доступ через SSH-туннель:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 deploy@31.76.15.130
+# затем в браузере http://localhost:3000 — логин admin, пароль GF_SECURITY_ADMIN_PASSWORD
+# (посмотреть: ssh deploy@31.76.15.130 sudo grep GF_SECURITY /etc/assistant/infra.env)
+```
+
+Дашборды: «Технический» (очереди, латентность, ошибки LLM, стоимость/день) и «Продуктовый» (DAU/WAU, retention D7, сообщений/пользователь, доля голосовых, топ инструментов). Алерты и так приходят в канал владельца.
 
 ## Известные грабли
 
