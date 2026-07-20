@@ -121,6 +121,7 @@ async def _set_my_commands() -> None:
                 BotCommand(command="start", description="Начать работу с ассистентом"),  # noqa: RUF001
                 BotCommand(command="help", description="Что умеет ассистент"),
                 BotCommand(command="feedback", description="Отправить отзыв разработчику"),
+                BotCommand(command="timezone", description="Сменить часовой пояс"),
             ]
         )
     finally:

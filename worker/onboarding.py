@@ -11,7 +11,6 @@ from collections.abc import Awaitable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
-from zoneinfo import available_timezones
 
 import asyncpg
 import uuid_utils
@@ -19,6 +18,12 @@ import uuid_utils
 from core.context import TaskContext
 from core.db import service_transaction
 from core.envelope import UpdateEnvelope
+from core.timezones import (
+    TIMEZONE_BUTTONS,
+    VALID_TIMEZONES,
+    local_time_fields,
+    resolve_timezone,
+)
 from worker.processor import ContextualProcessor
 from worker.reply import WorkerReply
 
@@ -80,114 +85,27 @@ UNKNOWN_CITY_TEXT = (
     "Не узнал город — выберите кнопкой или пришлите крупный город рядом (например, „Самара“)."
 )
 OTHER_CITY_TEXT = "Пришлите название города текстом"
+CHANGE_TIMEZONE_PROMPT_TEXT = (
+    "Ваш часовой пояс сейчас: {tz}. Выберите новый — по разнице с Москвой:"
+)
+TIMEZONE_CHANGED_TEXT = "Часовой пояс обновлён: {tz}, сейчас у вас {local_time}."
+RECURRING_REMINDERS_SHIFTED_TEXT = (
+    " Повторяющиеся напоминания (сейчас их {count}) теперь будут приходить по новому времени."
+)
 
 TIMEZONE_PENDING_TTL_SECONDS = 604_800
 REJECTED_NOTIFIED_TTL_SECONDS = 86_400
 PROVISIONAL_TIMEZONE = "Europe/Moscow"
 
-# All eleven Russian time zones, labelled by their offset from Moscow with an anchor city.
-TIMEZONE_BUTTONS: list[list[tuple[str, str]]] = [
-    [
-        ("МСК-1 · Калининград", "tz:Europe/Kaliningrad"),
-        ("МСК · Москва, Санкт-Петербург", "tz:Europe/Moscow"),
-    ],
-    [
-        ("МСК+1 · Самара", "tz:Europe/Samara"),
-        ("МСК+2 · Екатеринбург", "tz:Asia/Yekaterinburg"),
-    ],
-    [
-        ("МСК+3 · Омск", "tz:Asia/Omsk"),
-        ("МСК+4 · Красноярск", "tz:Asia/Krasnoyarsk"),
-    ],
-    [
-        ("МСК+5 · Иркутск", "tz:Asia/Irkutsk"),
-        ("МСК+6 · Якутск", "tz:Asia/Yakutsk"),
-    ],
-    [
-        ("МСК+7 · Владивосток", "tz:Asia/Vladivostok"),
-        ("МСК+8 · Магадан", "tz:Asia/Magadan"),
-    ],
-    [("МСК+9 · Камчатка", "tz:Asia/Kamchatka")],
-    [("Другой город — напишу текстом", "tz:other")],
-]
+# Marks why the timezone prompt was armed: the onboarding path also sends the welcome pair.
+TZ_PENDING_ONBOARDING = "onboarding"
+TZ_PENDING_CHANGE = "change"
 
-CITY_TZ: dict[str, str] = {
-    # UTC+2 (MSK-1)
-    "калининград": "Europe/Kaliningrad",
-    # UTC+3 (MSK)
-    "москва": "Europe/Moscow",
-    "санкт-петербург": "Europe/Moscow",
-    "петербург": "Europe/Moscow",
-    "нижний новгород": "Europe/Moscow",
-    "казань": "Europe/Moscow",
-    "ростов-на-дону": "Europe/Moscow",
-    "краснодар": "Europe/Moscow",
-    "воронеж": "Europe/Moscow",
-    "волгоград": "Europe/Volgograd",
-    "сочи": "Europe/Moscow",
-    "мурманск": "Europe/Moscow",
-    "архангельск": "Europe/Moscow",
-    "ярославль": "Europe/Moscow",
-    "тула": "Europe/Moscow",
-    "рязань": "Europe/Moscow",
-    "симферополь": "Europe/Simferopol",
-    "севастополь": "Europe/Simferopol",
-    "минск": "Europe/Minsk",
-    # UTC+4 (MSK+1)
-    "самара": "Europe/Samara",
-    "саратов": "Europe/Saratov",
-    "тольятти": "Europe/Samara",
-    "ижевск": "Europe/Samara",
-    "ульяновск": "Europe/Ulyanovsk",
-    "астрахань": "Europe/Astrakhan",
-    # UTC+5 (MSK+2)
-    "екатеринбург": "Asia/Yekaterinburg",
-    "челябинск": "Asia/Yekaterinburg",
-    "уфа": "Asia/Yekaterinburg",
-    "пермь": "Asia/Yekaterinburg",
-    "тюмень": "Asia/Yekaterinburg",
-    "сургут": "Asia/Yekaterinburg",
-    "оренбург": "Asia/Yekaterinburg",
-    "алматы": "Asia/Almaty",
-    "астана": "Asia/Almaty",
-    "ташкент": "Asia/Tashkent",
-    # UTC+6 (MSK+3)
-    "омск": "Asia/Omsk",
-    "бишкек": "Asia/Bishkek",
-    # UTC+7 (MSK+4)
-    "новосибирск": "Asia/Novosibirsk",
-    "красноярск": "Asia/Krasnoyarsk",
-    "барнаул": "Asia/Barnaul",
-    "томск": "Asia/Tomsk",
-    "кемерово": "Asia/Novokuznetsk",
-    "новокузнецк": "Asia/Novokuznetsk",
-    # UTC+8 (MSK+5)
-    "иркутск": "Asia/Irkutsk",
-    "улан-удэ": "Asia/Irkutsk",
-    "братск": "Asia/Irkutsk",
-    # UTC+9 (MSK+6)
-    "якутск": "Asia/Yakutsk",
-    "чита": "Asia/Chita",
-    "благовещенск": "Asia/Yakutsk",
-    # UTC+10 (MSK+7)
-    "владивосток": "Asia/Vladivostok",
-    "хабаровск": "Asia/Vladivostok",
-    # UTC+11 (MSK+8)
-    "магадан": "Asia/Magadan",
-    "южно-сахалинск": "Asia/Sakhalin",
-    # UTC+12 (MSK+9)
-    "камчатка": "Asia/Kamchatka",
-    "петропавловск-камчатский": "Asia/Kamchatka",
-    "анадырь": "Asia/Anadyr",
-    # Other CIS capitals
-    "ереван": "Asia/Yerevan",
-    "тбилиси": "Asia/Tbilisi",
-    "баку": "Asia/Baku",
-    "киев": "Europe/Kyiv",
-    "кишинёв": "Europe/Chisinau",
-}
-
-VALID_TIMEZONES = frozenset(available_timezones())
+RECURRING_REMINDERS_QUERY = """
+SELECT COUNT(*)
+FROM scheduled_tasks
+WHERE user_id = $1 AND kind = 'reminder' AND status = 'active' AND cron_expr IS NOT NULL
+"""
 
 LOGGER = logging.getLogger(__name__)
 
@@ -217,6 +135,8 @@ class CacheRedis(HintRedis, Protocol):
     """Subset of Redis cache commands used by onboarding."""
 
     def exists(self, name: str) -> Awaitable[int]: ...
+
+    def get(self, name: str) -> Awaitable[object]: ...
 
     def delete(self, *names: str) -> Awaitable[int]: ...
 
@@ -373,10 +293,22 @@ class OnboardingProcessor:
     async def _start_timezone_selection(self, tg_user_id: int, chat_id: int) -> None:
         await self._cache_redis.set(
             _tz_pending_key(tg_user_id),
-            "1",
+            TZ_PENDING_ONBOARDING,
             ex=TIMEZONE_PENDING_TTL_SECONDS,
         )
         await self._send(chat_id, START_TIMEZONE_PROMPT_TEXT, TIMEZONE_BUTTONS)
+
+    async def _start_timezone_change(self, user: UserRow) -> None:
+        await self._cache_redis.set(
+            _tz_pending_key(user.tg_user_id),
+            TZ_PENDING_CHANGE,
+            ex=TIMEZONE_PENDING_TTL_SECONDS,
+        )
+        await self._send(
+            user.tg_chat_id,
+            CHANGE_TIMEZONE_PROMPT_TEXT.format(tz=user.timezone),
+            TIMEZONE_BUTTONS,
+        )
 
     async def _reject_user(self, tg_user_id: int) -> str:
         async with service_transaction(self._service_pool) as connection:
@@ -485,6 +417,9 @@ class OnboardingProcessor:
             return HELP_TEXT
         if text == "/start":
             return ALREADY_ACTIVE_TEXT
+        if text == "/timezone":
+            await self._start_timezone_change(user)
+            return None
         feedback = _feedback_text(text) if text is not None else None
         if feedback is not None:
             if feedback == "":
@@ -506,7 +441,7 @@ class OnboardingProcessor:
         return None
 
     async def _process_timezone_text(self, envelope: UpdateEnvelope, text: str) -> str | None:
-        timezone = CITY_TZ.get(text.strip().lower())
+        timezone = resolve_timezone(text)
         if timezone is None:
             await self._send(envelope.chat_id, UNKNOWN_CITY_TEXT, TIMEZONE_BUTTONS)
             return None
@@ -514,28 +449,50 @@ class OnboardingProcessor:
         return None
 
     async def _save_timezone(self, tg_user_id: int, timezone: str) -> None:
+        pending = await self._cache_redis.get(_tz_pending_key(tg_user_id))
         async with service_transaction(self._service_pool) as connection:
             row = await connection.fetchrow(
                 """
                 UPDATE users
                 SET timezone = $2, updated_at = now()
                 WHERE tg_user_id = $1
-                RETURNING tg_chat_id
+                RETURNING id, tg_chat_id
                 """,
                 tg_user_id,
                 timezone,
             )
-        if row is None:
-            self._logger.warning("timezone save target disappeared: tg_user_id=%s", tg_user_id)
-            return
+            if row is None:
+                self._logger.warning("timezone save target disappeared: tg_user_id=%s", tg_user_id)
+                return
+            recurring = await connection.fetchval(RECURRING_REMINDERS_QUERY, row["id"])
         await self._cache_redis.delete(_tz_pending_key(tg_user_id))
-        await self._send(row["tg_chat_id"], WELCOME_TEXT.format(tz=timezone))
-        await self._send(row["tg_chat_id"], WELCOME_CTA_TEXT)
+
+        chat_id = row["tg_chat_id"]
+        if _decoded(pending) == TZ_PENDING_ONBOARDING:
+            await self._send(chat_id, WELCOME_TEXT.format(tz=timezone))
+            await self._send(chat_id, WELCOME_CTA_TEXT)
+            return
+
+        confirmation = TIMEZONE_CHANGED_TEXT.format(
+            tz=timezone,
+            local_time=local_time_fields(timezone)["local_time"],
+        )
+        if int(recurring or 0) > 0:
+            confirmation += RECURRING_REMINDERS_SHIFTED_TEXT.format(count=int(recurring))
+        await self._send(chat_id, confirmation)
 
 
 def _payload_text(envelope: UpdateEnvelope) -> str | None:
     text = envelope.payload.get("text")
     return text if isinstance(text, str) else None
+
+
+def _decoded(value: object) -> str | None:
+    """Normalize a Redis value that may arrive as bytes or str."""
+
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value if isinstance(value, str) else None
 
 
 def _feedback_text(text: str) -> str | None:

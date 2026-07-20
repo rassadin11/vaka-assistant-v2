@@ -88,7 +88,7 @@ async def test_set_my_commands_publishes_user_commands(
     await gateway_main._set_my_commands()
 
     assert fake_bot.commands is not None
-    assert [c.command for c in fake_bot.commands] == ["start", "help", "feedback"]
+    assert [c.command for c in fake_bot.commands] == ["start", "help", "feedback", "timezone"]
     assert all(c.description for c in fake_bot.commands)
     assert "reject" not in [c.command for c in fake_bot.commands]
     assert fake_bot.session.closed

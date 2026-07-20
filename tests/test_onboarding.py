@@ -12,16 +12,19 @@ from zoneinfo import ZoneInfo
 
 from core.context import TaskContext
 from core.envelope import UpdateEnvelope
+from core.timezones import CITY_TZ, TIMEZONE_BUTTONS, VALID_TIMEZONES
 from worker.onboarding import (
     ALREADY_ACTIVE_TEXT,
     ASSISTANT_CAPABILITIES_TEXT,
-    CITY_TZ,
+    CHANGE_TIMEZONE_PROMPT_TEXT,
     HELP_TEXT,
+    RECURRING_REMINDERS_SHIFTED_TEXT,
     REJECTED_TEXT,
     START_TIMEZONE_PROMPT_TEXT,
-    TIMEZONE_BUTTONS,
+    TIMEZONE_CHANGED_TEXT,
+    TZ_PENDING_CHANGE,
+    TZ_PENDING_ONBOARDING,
     UNKNOWN_CITY_TEXT,
-    VALID_TIMEZONES,
     WELCOME_CTA_TEXT,
     WELCOME_TEXT,
     OnboardingProcessor,
@@ -71,6 +74,7 @@ class FakeAcquire:
 class FakePool:
     def __init__(self) -> None:
         self.users: dict[int, dict[str, Any]] = {}
+        self.recurring_reminders = 0
         self.connection = FakeConnection(self)
 
     def acquire(self) -> FakeAcquire:
@@ -120,7 +124,7 @@ class FakeConnection:
             elif "SET timezone" in query:
                 row["timezone"] = args[1]
             row["updated_at"] = datetime.now(UTC)
-            return {"tg_chat_id": row["tg_chat_id"]}
+            return {"id": row["id"], "tg_chat_id": row["tg_chat_id"]}
         if row is None:
             return None
         return {
@@ -136,6 +140,12 @@ class FakeConnection:
                 else json.dumps(row["assistant_profile"], ensure_ascii=False)
             ),
         }
+
+    async def fetchval(self, query: str, *args: object) -> object:
+        del args
+        if "FROM scheduled_tasks" in query:
+            return self._pool.recurring_reminders
+        raise AssertionError(f"unexpected query: {query}")
 
     async def execute(self, query: str, *args: object) -> str:
         if query.lstrip().startswith("INSERT INTO users"):
@@ -170,6 +180,9 @@ class FakeCache:
 
     async def exists(self, name: str) -> int:
         return int(name in self.values)
+
+    async def get(self, name: str) -> str | None:
+        return self.values.get(name)
 
     async def set(
         self,
@@ -259,7 +272,7 @@ async def test_first_contact_creates_active_user_and_prompts_for_timezone() -> N
     assert pool.users[101]["status"] == "active"
     assert pool.users[101]["tg_chat_id"] == 501
     assert pool.users[101]["timezone"] == "Europe/Moscow"
-    assert cache.values["onboarding:tz_pending:101"] == "1"
+    assert cache.values["onboarding:tz_pending:101"] == TZ_PENDING_ONBOARDING
     assert recorder.sent == [(501, START_TIMEZONE_PROMPT_TEXT, TIMEZONE_BUTTONS)]
     assert recorder.admin == ["Новый пользователь: id 101."]
 
@@ -273,7 +286,7 @@ async def test_legacy_pending_user_is_activated_and_prompted_on_contact() -> Non
 
     assert await processor.process(_envelope(tg_user_id=101)) is None
     assert pool.users[101]["status"] == "active"
-    assert cache.values["onboarding:tz_pending:101"] == "1"
+    assert cache.values["onboarding:tz_pending:101"] == TZ_PENDING_ONBOARDING
     assert recorder.sent == [(101, START_TIMEZONE_PROMPT_TEXT, TIMEZONE_BUTTONS)]
 
 
@@ -321,7 +334,7 @@ async def test_timezone_callback_updates_timezone_sends_welcome_and_answers_call
     recorder = Recorder()
     processor = _processor(pool, cache, recorder)
     pool.add_user(101, status="active")
-    cache.values["onboarding:tz_pending:101"] = "1"
+    cache.values["onboarding:tz_pending:101"] = TZ_PENDING_ONBOARDING
 
     reply = await processor.process(
         _envelope(
@@ -352,8 +365,8 @@ async def test_timezone_text_fallback_known_and_unknown_city() -> None:
     processor = _processor(pool, cache, recorder)
     pool.add_user(101, status="active")
     pool.add_user(102, status="active")
-    cache.values["onboarding:tz_pending:101"] = "1"
-    cache.values["onboarding:tz_pending:102"] = "1"
+    cache.values["onboarding:tz_pending:101"] = TZ_PENDING_ONBOARDING
+    cache.values["onboarding:tz_pending:102"] = TZ_PENDING_ONBOARDING
 
     known = await processor.process(_envelope(tg_user_id=101, text=" Самара "))
     unknown = await processor.process(_envelope(tg_user_id=102, text="Городок"))
@@ -552,3 +565,95 @@ def test_timezone_text_fallback_maps_known_cities_to_valid_zones() -> None:
     # CIS cities lost their buttons, so the text fallback must still resolve them.
     assert CITY_TZ["минск"] == "Europe/Minsk"
     assert CITY_TZ["алматы"] == "Asia/Almaty"
+
+
+async def test_timezone_command_arms_change_mode_and_shows_current_zone() -> None:
+    pool = FakePool()
+    cache = FakeCache()
+    recorder = Recorder()
+    processor = _processor(pool, cache, recorder)
+    pool.add_user(101, status="active", timezone="Europe/Moscow")
+
+    reply = await processor.process(_envelope(tg_user_id=101, text="/timezone"))
+
+    assert reply is None
+    assert cache.values["onboarding:tz_pending:101"] == TZ_PENDING_CHANGE
+    assert recorder.sent == [
+        (101, CHANGE_TIMEZONE_PROMPT_TEXT.format(tz="Europe/Moscow"), TIMEZONE_BUTTONS),
+    ]
+
+
+async def test_changing_timezone_confirms_briefly_instead_of_repeating_the_welcome() -> None:
+    pool = FakePool()
+    cache = FakeCache()
+    recorder = Recorder()
+    processor = _processor(pool, cache, recorder)
+    pool.add_user(101, status="active", timezone="Europe/Moscow")
+    cache.values["onboarding:tz_pending:101"] = TZ_PENDING_CHANGE
+
+    reply = await processor.process(_envelope(tg_user_id=101, text="Новосибирск"))
+
+    assert reply is None
+    assert pool.users[101]["timezone"] == "Asia/Novosibirsk"
+    assert "onboarding:tz_pending:101" in cache.deleted
+    (chat_id, text, buttons) = recorder.sent[0]
+    assert len(recorder.sent) == 1
+    assert chat_id == 101
+    assert buttons is None
+    assert text.startswith("Часовой пояс обновлён: Asia/Novosibirsk, сейчас у вас ")
+    assert WELCOME_CTA_TEXT not in text
+
+
+async def test_changing_timezone_mentions_recurring_reminders_only_when_present() -> None:
+    pool = FakePool()
+    cache = FakeCache()
+    recorder = Recorder()
+    processor = _processor(pool, cache, recorder)
+    pool.recurring_reminders = 2
+    pool.add_user(101, status="active", timezone="Europe/Moscow")
+    pool.add_user(102, status="active", timezone="Europe/Moscow")
+    cache.values["onboarding:tz_pending:101"] = TZ_PENDING_CHANGE
+
+    await processor.process(_envelope(tg_user_id=101, text="Омск"))
+    shifted = recorder.sent[-1][1]
+
+    pool.recurring_reminders = 0
+    cache.values["onboarding:tz_pending:102"] = TZ_PENDING_CHANGE
+    await processor.process(_envelope(tg_user_id=102, text="Омск"))
+    quiet = recorder.sent[-1][1]
+
+    assert shifted.endswith(RECURRING_REMINDERS_SHIFTED_TEXT.format(count=2))
+    assert "Повторяющиеся напоминания" not in quiet
+
+
+async def test_stale_onboarding_keyboard_does_not_resend_the_welcome() -> None:
+    pool = FakePool()
+    cache = FakeCache()
+    recorder = Recorder()
+    processor = _processor(pool, cache, recorder)
+    pool.add_user(101, status="active", timezone="Europe/Moscow")
+
+    reply = await processor.process(
+        _envelope(
+            tg_user_id=101,
+            kind="callback",
+            payload={
+                "data": "tz:Asia/Omsk",
+                "message_id": 7,
+                "callback_query_id": "cb-stale",
+            },
+        )
+    )
+
+    assert reply is None
+    assert pool.users[101]["timezone"] == "Asia/Omsk"
+    assert len(recorder.sent) == 1
+    assert recorder.sent[0][1].startswith("Часовой пояс обновлён: Asia/Omsk")
+
+
+def test_timezone_change_texts_match_the_registry_spec() -> None:
+    assert TIMEZONE_CHANGED_TEXT == "Часовой пояс обновлён: {tz}, сейчас у вас {local_time}."
+    assert CHANGE_TIMEZONE_PROMPT_TEXT == (
+        "Ваш часовой пояс сейчас: {tz}. Выберите новый — по разнице с Москвой:"
+    )
+    assert TZ_PENDING_ONBOARDING != TZ_PENDING_CHANGE
