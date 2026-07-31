@@ -14,6 +14,7 @@ from aiogram.types import (
     BufferedInputFile,
     ForceReply,
     InlineKeyboardMarkup,
+    InputRichMessage,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
@@ -22,6 +23,12 @@ from core.telegram_format import markdown_to_telegram_html
 
 MAX_TELEGRAM_MESSAGE_CHARS = 4096
 MAX_TELEGRAM_DOWNLOAD_BYTES = 20 * 1024 * 1024
+
+# Bot API 10.1 does not publish the sendRichMessage payload ceiling, and aiogram
+# 3.30 carries no validator for it either. 32 KiB of UTF-8 is the conservative
+# value used by other implementations; anything above it goes the legacy route
+# instead of risking a rejected send.
+MAX_TELEGRAM_RICH_MESSAGE_BYTES = 32768
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,6 +49,16 @@ class TelegramBot(Protocol):
         parse_mode: str | None = None,
     ) -> Awaitable[object]:
         """Send a text message."""
+        ...
+
+    def send_rich_message(
+        self,
+        chat_id: int | str,
+        rich_message: InputRichMessage,
+        *,
+        reply_markup: TelegramReplyMarkup | None = None,
+    ) -> Awaitable[object]:
+        """Send a Bot API 10.1 rich message rendered by Telegram itself."""
         ...
 
     def send_chat_action(self, chat_id: int, action: str) -> Awaitable[object]:
@@ -131,6 +148,7 @@ class TelegramSender:
         sleep: Sleep | None = None,
         max_retries: int = 3,
         logger: logging.Logger | None = None,
+        use_rich_messages: bool = True,
     ) -> None:
         self._bot = bot
         self._admin_chat_ids = tuple(admin_chat_ids)
@@ -138,6 +156,7 @@ class TelegramSender:
         self._sleep = sleep if sleep is not None else asyncio.sleep
         self._max_retries = max_retries
         self._logger = logger if logger is not None else LOGGER
+        self._use_rich_messages = use_rich_messages
 
     async def send_message(
         self,
@@ -145,9 +164,54 @@ class TelegramSender:
         text: str,
         reply_markup: TelegramReplyMarkup | None = None,
     ) -> None:
-        """Send a text message, splitting long text into Telegram-sized chunks."""
+        """Send a text message as a rich message, falling back to split HTML chunks."""
 
+        if self._rich_message_applies(text) and await self._try_send_rich_message(
+            chat_id, text, reply_markup=reply_markup
+        ):
+            return
         await self._send_text(chat_id, text, reply_markup=reply_markup, format_as_html=True)
+
+    def _rich_message_applies(self, text: str) -> bool:
+        """Report whether the text is eligible for a single rich-message send."""
+
+        if not self._use_rich_messages or text == "":
+            return False
+        return len(text.encode("utf-8")) <= MAX_TELEGRAM_RICH_MESSAGE_BYTES
+
+    async def _try_send_rich_message(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        reply_markup: TelegramReplyMarkup | None = None,
+    ) -> bool:
+        """Send one rich message; return False when the caller must use the legacy path."""
+
+        rich_message = InputRichMessage(markdown=text)
+        retries = 0
+        while True:
+            await self._limiter.wait(chat_id=chat_id, apply_per_chat=True)
+            try:
+                await self._bot.send_rich_message(
+                    chat_id=chat_id,
+                    rich_message=rich_message,
+                    reply_markup=reply_markup,
+                )
+                return True
+            except TelegramRetryAfter as exc:
+                retries += 1
+                if retries > self._max_retries:
+                    self._logger.warning("telegram rich message retry limit exceeded: %s", exc)
+                    raise
+                await self._sleep(float(exc.retry_after))
+            except TelegramBadRequest as exc:
+                # Unsupported method, malformed markdown or an undocumented size
+                # ceiling all surface here; the legacy path must still deliver.
+                self._logger.warning(
+                    "telegram rich message rejected; falling back to HTML send: %s", exc
+                )
+                return False
 
     async def _send_text(
         self,
