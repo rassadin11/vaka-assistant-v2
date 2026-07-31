@@ -10,7 +10,7 @@ from core.prompt import PROMPT_VERSION, get_prompt
 from core.tokens import count_tokens, truncate_to_tokens
 
 BUDGETS: dict[str, int] = {
-    "A": 1500,
+    "A": 2500,
     "C": 100,
     "C2": 200,
     "D": 400,

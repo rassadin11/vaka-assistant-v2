@@ -29,6 +29,7 @@ EXPECTED_TABLES = {
     "messages",
     "dialog_summaries",
     "memory_facts",
+    "notes",
     "transactions",
     "budgets",
     "scheduled_tasks",

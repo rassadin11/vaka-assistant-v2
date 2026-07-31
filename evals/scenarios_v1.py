@@ -163,6 +163,42 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         description="Clear the assistant persona and restore default communication.",
         parameters=_object({}),
     ),
+    "upsert_note": ToolDefinition(
+        name="upsert_note",
+        description=(
+            "Create a topic note or fully replace the text of an existing one, "
+            "addressed by its title."
+        ),
+        parameters=_object(
+            {"title": {"type": "string"}, "content": {"type": "string"}},
+            ["title"],
+        ),
+    ),
+    "append_to_note": ToolDefinition(
+        name="append_to_note",
+        description=(
+            "Append one entry to a topic note, creating the note when it does not exist yet."
+        ),
+        parameters=_object(
+            {"title": {"type": "string"}, "text": {"type": "string"}},
+            ["title", "text"],
+        ),
+    ),
+    "list_notes": ToolDefinition(
+        name="list_notes",
+        description="List the titles, sizes, and update times of all the user's notes.",
+        parameters=_object({}),
+    ),
+    "read_note": ToolDefinition(
+        name="read_note",
+        description="Read the full text of one topic note by its title.",
+        parameters=_object({"title": {"type": "string"}}, ["title"]),
+    ),
+    "delete_note": ToolDefinition(
+        name="delete_note",
+        description="Delete one topic note by its title after the user explicitly asked for it.",
+        parameters=_object({"title": {"type": "string"}}, ["title"]),
+    ),
 }
 
 
@@ -211,6 +247,36 @@ def _tool_check(
         return True, "correct tool call"
 
     return check
+
+
+def _any_tool_check(*tool_names: str) -> Check:
+    """Accept exactly one call to any of several equally correct tools."""
+
+    def check(response: LLMResponse) -> tuple[bool, str]:
+        calls = response.message.tool_calls or []
+        if len(calls) != 1 or calls[0].name not in tool_names:
+            return False, f"expected one call of {tool_names}, got {[call.name for call in calls]}"
+        return True, "correct tool call"
+
+    return check
+
+
+def _revision_check(response: LLMResponse) -> tuple[bool, str]:
+    """Accept listing notes or proposing a clean-up, but never a silent deletion."""
+
+    calls = response.message.tool_calls or []
+    forbidden = {"delete_note", "upsert_note", "append_to_note"}
+    if any(call.name in forbidden for call in calls):
+        return False, f"acted on notes without consent: {[call.name for call in calls]}"
+    if len(calls) == 1 and calls[0].name == "list_notes":
+        return True, "listed notes before proposing a clean-up"
+    if calls:
+        return False, f"unexpected tool call: {[call.name for call in calls]}"
+    text = (response.message.content or "").lower()
+    revision_wordings = ("удал", "объедин", "почист", "ревиз", "освобод", "сократ")
+    if not any(word in text for word in revision_wordings):
+        return False, f"missing a clean-up proposal: {revision_wordings}"
+    return True, "proposed a clean-up without touching notes"
 
 
 def _forbidden_present(text: str, term: str) -> bool:
@@ -885,10 +951,73 @@ def build_scenarios(prompt_version: str = "v1") -> list[Scenario]:
                 _tools("clear_assistant_persona"),
                 _tool_check("clear_assistant_persona"),
             ),
+            Scenario(
+                "notes-append-entry",
+                "Append a recurring topic entry to a note instead of remembering a fact.",
+                _messages(
+                    LLMMessage(
+                        role="user",
+                        content="Записывай мои пробежки: сегодня 5 км за 26:30",
+                    ),
+                    system_message=system_message,
+                ),
+                _tools("append_to_note", "upsert_note", "remember_fact"),
+                _tool_check("append_to_note", contains={"title": "пробежк", "text": "5"}),
+            ),
+            Scenario(
+                "notes-read-topic",
+                "Read the notes before answering a question about their contents.",
+                _messages(
+                    LLMMessage(role="user", content="Покажи все мои пробежки"),
+                    system_message=system_message,
+                ),
+                _tools("list_notes", "read_note", "remember_fact"),
+                _any_tool_check("list_notes", "read_note"),
+            ),
+            Scenario(
+                "notes-fact-not-note",
+                "Keep a one-off durable fact in memory rather than in a note.",
+                _messages(
+                    LLMMessage(role="user", content="Запомни: у меня аллергия на орехи"),
+                    system_message=system_message,
+                ),
+                _tools("remember_fact", "append_to_note", "upsert_note"),
+                _tool_check("remember_fact", contains={"fact": "аллерг"}),
+            ),
+            Scenario(
+                "notes-limit-revision",
+                "Propose a clean-up after the notes limit error without deleting anything.",
+                [
+                    system_message,
+                    LLMMessage(role="user", content="Заведи заметку про поездку в Казань"),
+                    LLMMessage(
+                        role="assistant",
+                        tool_calls=[
+                            LLMToolCall(
+                                id="notes-limit-1",
+                                name="upsert_note",
+                                arguments_json='{"title":"Поездка в Казань","content":""}',
+                            )
+                        ],
+                    ),
+                    LLMMessage(
+                        role="tool",
+                        tool_call_id="notes-limit-1",
+                        content=(
+                            '{"status":"error","retryable":false,"error":'
+                            '"Достигнут лимит 100 заметок. Предложите пользователю ревизию: '
+                            "показать список заметок (list_notes) и удалить или объединить "
+                            'неактуальные — сам или поручив вам."}'
+                        ),
+                    ),
+                ],
+                _tools("list_notes", "read_note", "delete_note", "upsert_note", "append_to_note"),
+                _revision_check,
+            ),
         ]
     )
-    if len(scenarios) != 42:
-        raise RuntimeError("Prompt evaluation suite must contain exactly 42 scenarios.")
+    if len(scenarios) != 46:
+        raise RuntimeError("Prompt evaluation suite must contain exactly 46 scenarios.")
     return scenarios
 
 

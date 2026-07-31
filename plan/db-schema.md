@@ -15,7 +15,7 @@
 - **Партиционирование**: tool_calls_log и usage — по месяцу (`created_at`), pg_partman; ключ партиции входит в PK. Ретеншн партиций — отложенное обсуждение №9 (сроки хранения).
 - **Хранение сообщений**: бессрочно до GDPR-удаления пользователя; суммаризация ничего не стирает.
 
-## Таблицы (13)
+## Таблицы (14)
 
 ```
 users
@@ -70,6 +70,18 @@ memory_facts
 INDEX (user_id, last_used_at)
 INDEX HNSW (embedding vector_cosine_ops)
 ```
+
+```
+notes                                        -- тематические заметки (внеплановая задача 2026-07-31, реестр §7c)
+  id              bigint identity PK         -- model-facing не нужен: адресация по title, id служебный
+  user_id         uuid FK CASCADE
+  title           text NOT NULL              -- тема: «Пробежки», «Идеи подарков»; ≤64 символов после trim
+  content         text NOT NULL DEFAULT ''   -- ≤8000 символов (влезает в бюджет tool result)
+  created_at / updated_at
+UNIQUE (user_id, title)                      -- одна заметка на тему, цель UPSERT
+```
+Без vector-колонки: заметок ≤100, модель читает список заголовков целиком (list_notes),
+семантический поиск не нужен. Автоинжекта в промпт нет — чтение только явными инструментами.
 
 ```
 transactions
@@ -227,5 +239,5 @@ SET search_path = pg_catalog, public
 ## Примечания для исполнителя миграции
 
 - GDPR-удаление (7.5): DELETE users каскадом закрывает всё, кроме tool_calls_log/usage (без FK) — их чистить отдельным DELETE по user_id в той же операции.
-- RLS включается (`ENABLE ROW LEVEL SECURITY`) на всех 13 таблицах; на партиционированных — на родителе.
+- RLS включается (`ENABLE ROW LEVEL SECURITY`) на всех 14 таблицах; на партиционированных — на родителе.
 - TaskContext.user_id в реестре инструментов — внутренний uuid users.id (не tg_user_id).
