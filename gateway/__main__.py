@@ -6,6 +6,8 @@ import asyncio
 import logging
 import os
 import sys
+import time
+from contextlib import suppress
 from typing import NoReturn
 
 import uvicorn
@@ -17,6 +19,15 @@ from core.logging_setup import setup_logging
 from core.telegram_sender import TelegramSender
 from gateway.app import ALLOWED_UPDATES, handle_update
 from gateway.config import config_from_env, optional_telegram_bot_token, telegram_bot_token
+
+# Liveness of the polling gateway, written to Redis for the container
+# healthcheck (plan/small-profile.md section 6, task S9). The polling deployment
+# serves no HTTP, so "the process exists" is all a healthcheck could otherwise
+# see -- and that is exactly the state that stays green while Telegram answers
+# 409 Conflict because a webhook is still registered on the token.
+POLLING_HEARTBEAT_KEY = "gw:polling:heartbeat"
+POLLING_HEARTBEAT_INTERVAL_SECONDS = 30.0
+POLLING_HEARTBEAT_TTL_SECONDS = 90
 
 
 def main() -> NoReturn:
@@ -70,13 +81,48 @@ async def _run_polling() -> None:
         )
 
     dispatcher.update.register(on_update)
+    heartbeat = asyncio.create_task(_publish_polling_heartbeat(bot, cache_redis))
     try:
         # pre_checkout_query will be added here when payments are implemented.
         await dispatcher.start_polling(bot, allowed_updates=ALLOWED_UPDATES)
     finally:
+        heartbeat.cancel()
+        with suppress(asyncio.CancelledError):
+            await heartbeat
         await queue_redis.aclose()
         await cache_redis.aclose()
         await bot.session.close()
+
+
+async def _publish_polling_heartbeat(bot: Bot, redis: Redis) -> None:
+    """Refresh the liveness key while polling can actually receive updates.
+
+    The check is ``getWebhookInfo``: it proves the token still works and that no
+    webhook is registered on it. Both matter, because ``getUpdates`` fails with
+    409 Conflict for as long as a webhook exists, and aiogram keeps retrying
+    that in the background -- a container that looks perfectly alive while no
+    message reaches the queue. Any failure simply stops the refresh and lets the
+    key expire, so the healthcheck reports the outage instead of the gateway
+    deciding on its own to die.
+    """
+
+    logger = logging.getLogger(__name__)
+    while True:
+        try:
+            info = await bot.get_webhook_info()
+            if info.url:
+                logger.warning("webhook still registered while polling: %s", info.url)
+            else:
+                await redis.set(
+                    POLLING_HEARTBEAT_KEY,
+                    str(int(time.time())),
+                    ex=POLLING_HEARTBEAT_TTL_SECONDS,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("polling heartbeat failed")
+        await asyncio.sleep(POLLING_HEARTBEAT_INTERVAL_SECONDS)
 
 
 async def _set_webhook() -> None:

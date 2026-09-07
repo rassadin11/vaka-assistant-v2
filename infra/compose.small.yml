@@ -1,0 +1,248 @@
+# Deployment profile "small": the whole service on a 2 GB VPS for 5-10 people.
+# Plan: plan/small-profile.md (memory budget in section 2, stack composition in
+# section 3, task S9 in section 6).
+#
+# Differences from compose.prod.yml, all of them deliberate:
+#   - no Caddy, no domain, no TLS: Telegram is polled, not webhooked (4.8);
+#   - no Infisical: secrets come from one env file on disk, mode 600 (S5);
+#   - no PgBouncer: asyncpg connects to postgres directly (S6);
+#   - no embeddings service: retrieval is Postgres full-text search (4.1);
+#   - one Redis instead of two, noeviction, every key with a TTL (4.3);
+#   - no Prometheus/Grafana/blackbox: /metrics stays only as a healthcheck (4.5).
+#
+# Operations are, over SSH:
+#
+#   git pull
+#   docker compose -f infra/compose.small.yml #     --env-file /etc/assistant/small-infra.env up -d --build
+#
+# There is no CI deploy and no Ansible in this profile. The app image is built
+# on the server by default; set APP_IMAGE to pull a prebuilt one instead.
+#
+# Two secret files, both mode 600 outside the repo (S5), because they are not
+# for the same audience:
+#   small-infra.env  -- POSTGRES_PASSWORD, SEARXNG_SECRET, MIGRATOR_DATABASE_URL,
+#                       MIGRATOR_DB_PASSWORD, APP_DB_PASSWORD,
+#                       SERVICE_DB_PASSWORD.
+#                       Passed as --env-file so compose can interpolate it, and
+#                       mounted only into the one-shot migrate container. The
+#                       migrator role can change the schema and the superuser
+#                       password owns the database, so neither belongs in a
+#                       long-running application container.
+#   small.env        -- TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, GROQ_API_KEY,
+#                       DATABASE_URL (app role), SERVICE_DATABASE_URL,
+#                       ADMIN_TELEGRAM_IDS, ALLOWED_TELEGRAM_IDS.
+#
+# Nothing is published to the host: the stack talks to Telegram outbound only,
+# so the single open port on the box stays SSH.
+
+name: personal-assistant-small
+
+x-app-image: &app-image ${APP_IMAGE:-personal-assistant-small:local}
+
+x-app-build: &app-build
+  context: ..
+  dockerfile: Dockerfile
+
+x-app-env-file: &app-env-file
+  - ${ENV_FILE_DIR:-/etc/assistant}/small.env
+
+# Flags that pick the profile. They are not secret and belong in the repo, where
+# a change is reviewable; anything listed here can still be overridden per
+# install by putting the same name in small.env.
+x-profile-env: &profile-env
+  DEPLOYMENT_PROFILE: small
+  RETRIEVAL_BACKEND: fts
+  EMBEDDINGS_BACKEND: none
+  REDIS_QUEUE_URL: redis://redis:6379/0
+  REDIS_CACHE_URL: redis://redis:6379/0
+  LOG_FORMAT: json
+
+services:
+  postgres:
+    # Same image as prod and dev: migration 0001 creates pg_partman, so the
+    # stock pgvector image is not enough. pgbackrest comes along in that image
+    # but never runs here -- archiving is off in postgresql.small.conf (4.6).
+    build:
+      context: ./postgres
+    image: ${POSTGRES_IMAGE:-personal-assistant-postgres:pg16-partman}
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.small.conf"]
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      POSTGRES_USER: assistant
+      POSTGRES_DB: assistant
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      # Read by 20-set-role-passwords.sh on first initialisation: init-roles.sql
+      # ships a fixed password that must not survive on a real install.
+      MIGRATOR_DB_PASSWORD: ${MIGRATOR_DB_PASSWORD:?}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?}
+      SERVICE_DB_PASSWORD: ${SERVICE_DB_PASSWORD:?}
+      # init-roles.sql runs pgbackrest-independent SQL only; the cipher
+      # passphrases exist because the shared image ships a pgbackrest config.
+      PGBACKREST_REPO1_CIPHER_PASS: ${PGBACKREST_REPO1_CIPHER_PASS:-unused-in-small-profile}
+      PGBACKREST_REPO2_CIPHER_PASS: ${PGBACKREST_REPO2_CIPHER_PASS:-unused-in-small-profile}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init-roles.sql:/docker-entrypoint-initdb.d/10-init-roles.sql:ro
+      - ./postgres/20-set-role-passwords.sh:/docker-entrypoint-initdb.d/20-set-role-passwords.sh:ro
+      - ./postgres/postgresql.small.conf:/etc/postgresql/postgresql.small.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assistant -d assistant"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  redis:
+    # One instance for queue and cache alike. It must be noeviction, because
+    # losing a queue entry loses a user's message -- which is why every cache
+    # key carries a TTL (S7).
+    image: redis:7.4.5-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    restart: unless-stopped
+    mem_limit: 112m
+    volumes:
+      - ./redis/redis-small.conf:/usr/local/etc/redis/redis.conf:ro
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  migrate:
+    # One-shot: `docker compose up -d` applies migrations before the app starts,
+    # because there is no deploy pipeline here to do it as a separate step.
+    # Runs as the migrator role, the only role allowed to change the schema.
+    image: *app-image
+    build: *app-build
+    # $$ keeps the expansion inside the container: the DSN lives in small.env,
+    # which compose reads for the container but never interpolates itself.
+    command: ["sh", "-ec", "export MIGRATIONS_DATABASE_URL=$${MIGRATOR_DATABASE_URL:?}; exec alembic upgrade head"]
+    restart: "no"
+    mem_limit: 256m
+    env_file:
+      - ${ENV_FILE_DIR:-/etc/assistant}/small-infra.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  gateway:
+    # Polling, not webhook: no domain, no TLS, no inbound port (4.8).
+    image: *app-image
+    build: *app-build
+    command: ["python", "-m", "gateway", "polling"]
+    restart: unless-stopped
+    mem_limit: 192m
+    env_file: *app-env-file
+    environment: *profile-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # There is no HTTP server in polling mode, and "the process is alive" is
+      # not health: while a webhook is still registered on the token, getUpdates
+      # answers 409 Conflict forever and no message reaches the queue. The
+      # gateway refreshes this key only while it can actually receive updates.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,sys,redis; sys.exit(0 if redis.Redis.from_url(os.environ['REDIS_CACHE_URL']).exists('gw:polling:heartbeat') else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Cold start is slow: importing the worker/gateway stack costs ~20 s on a
+      # dev machine (aiogram 10.1 model building alone is ~9 s) and more on one
+      # or two vCPU. A short start_period would fail the stack while it is
+      # merely booting.
+      start_period: 90s
+
+  worker:
+    # Single replica by design: ~350 MB idle, ~500 MB at the OCR peak, and the
+    # budget in section 2 has room for exactly one.
+    image: *app-image
+    build: *app-build
+    command: ["python", "-m", "worker"]
+    restart: unless-stopped
+    mem_limit: 640m
+    env_file: *app-env-file
+    environment:
+      <<: *profile-env
+      SEARXNG_URL: http://searxng:8080
+      WORKER_METRICS_PORT: "9100"
+    expose:
+      - "9100"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # /metrics stays enabled precisely for this check (4.5).
+      test:
+        - CMD
+        - python
+        - -c
+        - "from urllib.request import urlopen; urlopen('http://127.0.0.1:9100/metrics')"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  searxng:
+    # Self-hosted web search: free, keyless, and the only external dependency
+    # the profile keeps (4.2). One uwsgi worker instead of one per core.
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    mem_limit: 192m
+    environment:
+      FORCE_OWNERSHIP: "false"
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?}
+      UWSGI_WORKERS: "1"
+      UWSGI_THREADS: "2"
+    volumes:
+      - ./searxng/:/etc/searxng/:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://127.0.0.1:8080/healthz')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  webapp:
+    # Mini App is off by default: it needs another ~192 MB plus Caddy and a
+    # domain to be reachable, which leaves ~50 MB of headroom (4.4). Start it
+    # with `--profile miniapp` only after S13 says there is room.
+    profiles: ["miniapp"]
+    image: *app-image
+    build: *app-build
+    command: ["python", "-m", "webapp"]
+    restart: unless-stopped
+    mem_limit: 192m
+    env_file: *app-env-file
+    environment: *profile-env
+    expose:
+      - "8001"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from urllib.request import urlopen; urlopen('http://127.0.0.1:8001/app/healthz')"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+volumes:
+  postgres_data:
+  redis_data:

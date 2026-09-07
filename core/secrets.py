@@ -104,12 +104,22 @@ class EnvSecretsProvider:
         self._environ = environ if environ is not None else os.environ
 
     def get(self, name: str) -> str:
-        """Return an environment variable value."""
+        """Return an environment variable value.
+
+        A variable set to nothing counts as not configured. Env files are edited
+        by hand in the small profile, and a half-filled line (``TELEGRAM_BOT_TOKEN=``
+        while a token is being moved between installs) otherwise reaches the
+        caller as an empty string -- which fails much later and much less
+        clearly than a missing secret does.
+        """
 
         try:
-            return self._environ[name]
+            value = self._environ[name]
         except KeyError as exc:
             raise SecretNotFoundError(name) from exc
+        if not value.strip():
+            raise SecretNotFoundError(name)
+        return value
 
 
 class InfisicalSecretsProvider:

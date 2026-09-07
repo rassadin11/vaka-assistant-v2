@@ -1,0 +1,47 @@
+# Keep the build context small. The prod image is built by CI on a clean
+# checkout, but the small profile builds on the server from a working clone
+# (plan/small-profile.md S9), where a local virtualenv or a uv cache would
+# otherwise be shipped to the daemon -- gigabytes on a box that has neither the
+# disk nor the patience.
+
+# Local environments and caches
+.venv/
+.uv-cache/
+.uv-python/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+miniapp/dist/
+miniapp/node_modules/
+
+# VCS and tooling state
+.git/
+.github/
+.claude/
+.agents/
+.codex/
+.pre-commit-config.yaml
+
+# Secrets must never enter an image layer, however the file got here.
+.env
+.env.*
+*.env
+!infra/**/*.env.example
+
+# Data that has no business in an image
+*.dump
+*.sql.gz
+*.log
+htmlcov/
+.coverage
+.coverage.*
+
+# Documentation and planning: not needed at runtime.
+docs/
+plan/
+evals/
+assets/
+*.md

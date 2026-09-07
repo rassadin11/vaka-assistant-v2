@@ -1,7 +1,9 @@
-"""Unit coverage for the gateway's webhook management commands (S17)."""
+"""Unit coverage for the gateway CLI: webhook commands (S17), heartbeat (S9)."""
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from typing import Any
 
 import pytest
@@ -80,3 +82,69 @@ async def test_delete_webhook_fails_loudly_if_the_hook_is_still_there(
 
     with pytest.raises(RuntimeError, match="still registered"):
         await cli._delete_webhook()
+
+
+class HeartbeatBot:
+    def __init__(self, *, url: str = "", fail: bool = False) -> None:
+        self.url = url
+        self.fail = fail
+        self.calls = 0
+
+    async def get_webhook_info(self) -> FakeWebhookInfo:
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("telegram is unreachable")
+        return FakeWebhookInfo(self.url)
+
+
+class RecordingRedis:
+    def __init__(self) -> None:
+        self.writes: list[tuple[str, int | None]] = []
+
+    async def set(self, key: str, value: str, *, ex: int | None = None) -> None:
+        self.writes.append((key, ex))
+
+
+async def _run_one_heartbeat_cycle(bot: Any, redis: Any) -> None:
+    """Run the endless heartbeat loop for exactly one iteration."""
+
+    task = asyncio.create_task(cli._publish_polling_heartbeat(bot, redis))
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if bot.calls:
+            break
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+async def test_heartbeat_is_written_while_polling_can_receive() -> None:
+    bot = HeartbeatBot()
+    redis = RecordingRedis()
+
+    await _run_one_heartbeat_cycle(bot, redis)
+
+    assert redis.writes == [(cli.POLLING_HEARTBEAT_KEY, cli.POLLING_HEARTBEAT_TTL_SECONDS)]
+
+
+async def test_heartbeat_stops_while_a_webhook_is_still_registered() -> None:
+    """getUpdates answers 409 in this state, so the container must go unhealthy."""
+
+    bot = HeartbeatBot(url="https://example.com/webhook/x")
+    redis = RecordingRedis()
+
+    await _run_one_heartbeat_cycle(bot, redis)
+
+    assert redis.writes == []
+
+
+async def test_heartbeat_survives_a_failing_telegram_call() -> None:
+    """The key expires on its own; the gateway must not crash on a hiccup."""
+
+    bot = HeartbeatBot(fail=True)
+    redis = RecordingRedis()
+
+    await _run_one_heartbeat_cycle(bot, redis)
+
+    assert redis.writes == []
+    assert bot.calls == 1

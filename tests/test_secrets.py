@@ -44,6 +44,22 @@ def test_env_secrets_provider_raises_for_missing_value() -> None:
         provider.get("OPENROUTER_API_KEY")
 
 
+def test_env_secrets_provider_treats_a_blank_value_as_missing() -> None:
+    """A half-filled env file must read as "not configured", not as a secret.
+
+    An empty TELEGRAM_BOT_TOKEN reached aiogram as an empty string and crashed
+    the worker on "Token is invalid!" in a restart loop; callers that handle a
+    missing token already have a sane path.
+    """
+
+    provider = EnvSecretsProvider({"TELEGRAM_BOT_TOKEN": "", "OPENROUTER_API_KEY": "   "})
+
+    with pytest.raises(SecretNotFoundError):
+        provider.get("TELEGRAM_BOT_TOKEN")
+    with pytest.raises(SecretNotFoundError):
+        provider.get("OPENROUTER_API_KEY")
+
+
 def test_infisical_secrets_provider_logs_in_and_fetches_secret() -> None:
     transport = FakeTransport()
     provider = InfisicalSecretsProvider(
