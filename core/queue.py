@@ -25,6 +25,9 @@ DEFAULT_REDIS_CACHE_URL = "redis://localhost:6380/0"
 PARTITION_COUNT = 16
 STREAM_MAXLEN = 100_000
 DLQ_STREAM = "q:dlq"
+# Failures are worth keeping, but not without a bound: on the small profile's
+# noeviction instance an untrimmed stream grows until writes start failing.
+DLQ_MAXLEN = 10_000
 DEFAULT_RECLAIM_MIN_IDLE_MS = 210_000
 DEFAULT_MAX_DELIVERIES = 3
 USER_DLQ_MESSAGE = "Не получилось обработать запрос, разбираемся."  # noqa: RUF001
@@ -275,7 +278,12 @@ async def move_to_dlq(
             "delivery_count": str(final_delivery_count),
         }
     )
-    dlq_id = await redis.xadd(DLQ_STREAM, cast("dict[Any, Any]", dlq_entry))
+    dlq_id = await redis.xadd(
+        DLQ_STREAM,
+        cast("dict[Any, Any]", dlq_entry),
+        maxlen=DLQ_MAXLEN,
+        approximate=True,
+    )
     await ack(redis, message.queue, message.stream, message.entry_id)
     return _to_text(dlq_id)
 

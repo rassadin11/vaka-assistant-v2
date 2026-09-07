@@ -247,3 +247,16 @@ async def test_no_fallback_does_not_create_or_route_a_circuit_breaker() -> None:
 
     assert len(primary.calls) == 4
     assert await redis.get("cb:openrouter:primary/model") is None
+
+
+def test_semaphore_release_never_writes_the_key_without_an_expiry() -> None:
+    """A plain SET drops the TTL and leaves the semaphore key immortal (plan S7).
+
+    The underflow branch is unreachable while the script stays atomic -- GET then
+    DECR cannot interleave -- so this guards the shape of the script rather than
+    a live leak: any future edit that makes the branch reachable must not
+    resurrect the key without a lifetime.
+    """
+
+    assert "redis.call('SET'" not in SEMAPHORE_RELEASE_LUA
+    assert "redis.call('DEL'" in SEMAPHORE_RELEASE_LUA

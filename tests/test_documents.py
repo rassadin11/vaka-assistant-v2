@@ -11,6 +11,7 @@ import pytest
 from core.context import TaskContext
 from core.embeddings import EmbeddingsUnavailableError, MockEmbeddingsProvider
 from core.envelope import UpdateEnvelope
+from core.profile import RetrievalBackend, profile_limits
 from core.tools import ToolRegistry
 from tools.documents import (
     DeleteDocumentArgs,
@@ -23,14 +24,17 @@ from tools.documents import (
 from worker.documents import (
     EMBEDDINGS_UNAVAILABLE_TEXT,
     LIMIT_APPROACH_PDF_TEXT,
-    MAX_DOCUMENT_BYTES,
     MONTHLY_LIMIT_TEXT,
-    OCR_PAGE_LIMIT_TEXT,
+    OCR_PAGE_LIMIT_TEMPLATE,
     SUCCESS_TEXT,
     PdfIngestProcessor,
     _monthly_pages_key,
     chunk_pages,
 )
+
+
+def _document_limit() -> int:
+    return profile_limits().max_document_bytes
 
 
 class FakeTransaction:
@@ -72,7 +76,13 @@ class FakeConnection:
             document["pages"] = args[1]
         elif "INSERT INTO doc_chunks" in query:
             self.chunks.append(
-                {"doc_id": args[1], "page": args[2], "text": args[4], "tokens": args[5]}
+                {
+                    "doc_id": args[1],
+                    "page": args[2],
+                    "text": args[4],
+                    "tokens": args[5],
+                    "embedding": args[6],
+                }
             )
         else:
             raise AssertionError(query)
@@ -226,8 +236,9 @@ async def test_ingest_rejects_mime_and_size_before_download() -> None:
         await processor.process(_envelope(mime_type="text/plain"), _context())
         == "Поддерживаются только PDF-файлы"
     )
-    assert await processor.process(_envelope(size=MAX_DOCUMENT_BYTES + 1), _context()) == (
-        "PDF-файлы больше 20 МБ не поддерживаются"
+    megabytes = _document_limit() // (1024 * 1024)
+    assert await processor.process(_envelope(size=_document_limit() + 1), _context()) == (
+        f"PDF-файлы больше {megabytes} МБ не поддерживаются"
     )
     assert pool.connection.documents == []
 
@@ -242,7 +253,7 @@ async def test_sparse_pdf_uses_ocr_and_enforces_100_page_limit(
         lambda file_id, maximum: _download(_pdf([""]), file_id, maximum),
         MockEmbeddingsProvider(),
     )
-    monkeypatch.setattr("worker.documents._ocr_page", lambda _page: "ocr text")
+    monkeypatch.setattr("worker.documents._ocr_page", lambda _page, _limits: "ocr text")
     assert await processor.process(_envelope(), _context()) == SUCCESS_TEXT.format(pages=1)
 
     too_many = _pdf([""] * 101)
@@ -252,7 +263,8 @@ async def test_sparse_pdf_uses_ocr_and_enforces_100_page_limit(
         lambda file_id, maximum: _download(too_many, file_id, maximum),
         MockEmbeddingsProvider(),
     )
-    assert await processor.process(_envelope(), _context()) == OCR_PAGE_LIMIT_TEXT
+    expected = OCR_PAGE_LIMIT_TEMPLATE.format(pages=profile_limits().max_ocr_pages)
+    assert await processor.process(_envelope(), _context()) == expected
 
 
 async def test_monthly_counter_rejects_then_increments_only_after_success() -> None:
@@ -291,6 +303,39 @@ async def test_embeddings_outage_marks_document_failed() -> None:
     assert await processor.process(_envelope(), _context()) == EMBEDDINGS_UNAVAILABLE_TEXT
     assert pool.connection.documents[0]["status"] == "failed"
     assert redis.values == {}
+
+
+async def test_fts_profile_indexes_chunks_without_any_embeddings() -> None:
+    """The small profile has no embeddings service; chunks go in with a NULL vector."""
+
+    content = _pdf(["normal text " * 10])
+    pool, redis = FakePool(), FakeRedis()
+    processor = PdfIngestProcessor(
+        pool,
+        redis,
+        lambda file_id, maximum: _download(content, file_id, maximum),
+        None,
+        retrieval=RetrievalBackend.FTS,
+    )
+
+    assert await processor.process(_envelope(), _context()) == SUCCESS_TEXT.format(pages=1)
+    assert pool.connection.documents[0]["status"] == "ready"
+    assert pool.connection.chunks
+    assert all(chunk["embedding"] is None for chunk in pool.connection.chunks)
+
+
+async def test_fts_profile_never_calls_the_embeddings_service() -> None:
+    content = _pdf(["normal text " * 10])
+    pool, redis = FakePool(), FakeRedis()
+    processor = PdfIngestProcessor(
+        pool,
+        redis,
+        lambda file_id, maximum: _download(content, file_id, maximum),
+        UnavailableEmbeddings(),  # type: ignore[arg-type]
+        retrieval=RetrievalBackend.FTS,
+    )
+
+    assert await processor.process(_envelope(), _context()) == SUCCESS_TEXT.format(pages=1)
 
 
 async def test_pdf_limit_approach_is_appended_once_after_eighty_percent() -> None:

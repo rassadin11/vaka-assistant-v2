@@ -15,6 +15,7 @@ from core.db import service_transaction
 from core.envelope import UpdateEnvelope
 from core.queue import DEFAULT_REDIS_CACHE_URL
 from worker.onboarding import (
+    NOT_ADMITTED_TEXT,
     START_TIMEZONE_PROMPT_TEXT,
     TIMEZONE_BUTTONS,
     WELCOME_CTA_TEXT,
@@ -152,3 +153,61 @@ async def test_onboarding_round_trip_against_postgres(
     assert row is not None
     assert row["status"] == "active"
     assert row["timezone"] == "Europe/Kaliningrad"
+
+
+async def test_allow_list_keeps_a_stranger_out_of_postgres(
+    monkeypatch: pytest.MonkeyPatch,
+    service_pool: asyncpg.Pool,
+    cache_redis: Redis,
+) -> None:
+    """The gate has to hold against the real database, not just a fake (plan S12)."""
+
+    update_id = int(time.time() * 1000) % 1_000_000_000
+    admitted = 991_100_000 + update_id
+    stranger = 991_300_000 + update_id
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", str(admitted))
+    recorder = Recorder()
+    processor = OnboardingProcessor(
+        service_pool=service_pool,
+        cache_redis=cache_redis,
+        inner=EchoProcessor(),
+        send=recorder.send,
+        answer_callback=recorder.answer_callback,
+        notify_admin=recorder.notify_admin,
+        admin_ids=(),
+    )
+
+    try:
+        await cache_redis.delete(
+            f"onboarding:tz_pending:{admitted}",
+            f"onboarding:not_admitted:{stranger}",
+        )
+        async with service_transaction(service_pool) as connection:
+            await connection.execute(
+                "DELETE FROM users WHERE tg_user_id = ANY($1::bigint[])", [admitted, stranger]
+            )
+
+        refused = await processor.process(_envelope(update_id, stranger, "/start"))
+        refused_again = await processor.process(_envelope(update_id + 1, stranger, "ещё раз"))
+        admitted_reply = await processor.process(_envelope(update_id + 2, admitted, "/start"))
+
+        async with service_transaction(service_pool) as connection:
+            rows = await connection.fetch(
+                "SELECT tg_user_id, status FROM users WHERE tg_user_id = ANY($1::bigint[])",
+                [admitted, stranger],
+            )
+
+        assert refused == NOT_ADMITTED_TEXT
+        assert refused_again is None
+        assert admitted_reply is None
+        assert [(row["tg_user_id"], row["status"]) for row in rows] == [(admitted, "active")]
+        assert recorder.admin == [f"Новый пользователь: id {admitted}."]
+    finally:
+        await cache_redis.delete(
+            f"onboarding:tz_pending:{admitted}",
+            f"onboarding:not_admitted:{stranger}",
+        )
+        async with service_transaction(service_pool) as connection:
+            await connection.execute(
+                "DELETE FROM users WHERE tg_user_id = ANY($1::bigint[])", [admitted, stranger]
+            )

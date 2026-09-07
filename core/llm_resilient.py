@@ -43,7 +43,9 @@ if current <= 0 then
 end
 local remaining = redis.call('DECR', KEYS[1])
 if remaining < 0 then
-    redis.call('SET', KEYS[1], '0')
+    -- DEL, not SET '0': a plain SET drops the TTL and leaves the key immortal,
+    -- and acquire already reads a missing key as zero (plan S7).
+    redis.call('DEL', KEYS[1])
     return 0
 end
 return remaining

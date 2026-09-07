@@ -14,10 +14,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from core.context import TaskContext
 from core.db import user_transaction
+from core.profile import profile_limits
 from core.tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
 
-MAX_NOTES_PER_USER = 100
 MAX_NOTE_TITLE_LENGTH = 64
+# A context budget, not a storage budget: list_notes spends about 25-30
+# tokens per row, and 300 rows would blow the 6-8k budget for a whole
+# request. Applies in both profiles for that reason (plan S10).
+LIST_NOTES_LIMIT = 50
 MAX_NOTE_CONTENT_LENGTH = 8000
 MAX_APPEND_TEXT_LENGTH = 1000
 SUGGESTED_TITLES_LIMIT = 10
@@ -28,8 +32,8 @@ CONTENT_TOO_LONG_ERROR = (
     f"Текст заметки должен быть не длиннее {MAX_NOTE_CONTENT_LENGTH} символов. "
     "Сократите текст или разбейте тему на несколько заметок."
 )
-NOTES_LIMIT_ERROR = (
-    f"Достигнут лимит {MAX_NOTES_PER_USER} заметок. Предложите пользователю ревизию: "
+NOTES_LIMIT_ERROR_TEMPLATE = (
+    "Достигнут лимит {limit} заметок. Предложите пользователю ревизию: "
     "показать список заметок (list_notes) и удалить или объединить неактуальные — "
     "сам или поручив вам."
 )
@@ -194,8 +198,8 @@ async def _upsert_note(
     async with user_transaction(pool, ctx.user_id) as connection:
         existing = await connection.fetchrow(_RESOLVE_EXACT_SQL, title)
         created = existing is None
-        if created and await _count_notes(connection) >= MAX_NOTES_PER_USER:
-            return ToolResult(status="error", error=NOTES_LIMIT_ERROR, retryable=False)
+        if created and await _count_notes(connection) >= profile_limits().notes_per_user:
+            return ToolResult(status="error", error=_notes_limit_error(), retryable=False)
         await connection.execute(
             """
             INSERT INTO notes (user_id, title, content, created_at, updated_at)
@@ -214,7 +218,7 @@ async def _upsert_note(
         payload={
             "created": created,
             "notes_count": notes_count,
-            "notes_limit": MAX_NOTES_PER_USER,
+            "notes_limit": profile_limits().notes_per_user,
         },
     )
 
@@ -241,8 +245,8 @@ async def _append_to_note(
         existing = await _resolve_note(connection, title)
         created = existing is None
         if created:
-            if await _count_notes(connection) >= MAX_NOTES_PER_USER:
-                return ToolResult(status="error", error=NOTES_LIMIT_ERROR, retryable=False)
+            if await _count_notes(connection) >= profile_limits().notes_per_user:
+                return ToolResult(status="error", error=_notes_limit_error(), retryable=False)
             note_content = text
             if len(note_content) > MAX_NOTE_CONTENT_LENGTH:
                 return ToolResult(status="error", error=CONTENT_TOO_LONG_ERROR, retryable=True)
@@ -281,12 +285,18 @@ async def _append_to_note(
             "note_chars": len(note_content),
             "note_chars_limit": MAX_NOTE_CONTENT_LENGTH,
             "notes_count": notes_count,
-            "notes_limit": MAX_NOTES_PER_USER,
+            "notes_limit": profile_limits().notes_per_user,
         },
     )
 
 
+def _notes_limit_error() -> str:
+    return NOTES_LIMIT_ERROR_TEMPLATE.format(limit=profile_limits().notes_per_user)
+
+
 async def _list_notes(pool: asyncpg.Pool, ctx: TaskContext) -> ToolResult:
+    """List the most recently updated notes, capped to fit the context budget."""
+
     timezone = ZoneInfo(ctx.timezone)
     async with user_transaction(pool, ctx.user_id) as connection:
         rows = await connection.fetch(
@@ -294,8 +304,11 @@ async def _list_notes(pool: asyncpg.Pool, ctx: TaskContext) -> ToolResult:
             SELECT title, updated_at, length(content) AS chars
             FROM notes
             ORDER BY updated_at DESC, title
-            """
+            LIMIT $1
+            """,
+            LIST_NOTES_LIMIT,
         )
+        total = int(cast(int, await connection.fetchval("SELECT count(*) FROM notes")))
     notes = [
         {
             "title": _as_str(row["title"]),
@@ -308,8 +321,12 @@ async def _list_notes(pool: asyncpg.Pool, ctx: TaskContext) -> ToolResult:
         status="ok",
         payload={
             "notes": notes,
+            # notes_count stays the size of this page; notes_total says how many
+            # exist, so the model knows when it is looking at a truncated view
+            # and can reach for read_note (prompt rule 16h).
             "notes_count": len(notes),
-            "notes_limit": MAX_NOTES_PER_USER,
+            "notes_total": total,
+            "notes_limit": profile_limits().notes_per_user,
         },
     )
 

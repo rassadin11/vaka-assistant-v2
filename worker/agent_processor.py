@@ -32,6 +32,7 @@ from core.envelope import UpdateEnvelope
 from core.limits import (
     LimitAxis,
     LimitsRedis,
+    LimitUsage,
     add_message,
     claim_limit_notice,
     limits_snapshot,
@@ -39,8 +40,10 @@ from core.limits import (
 )
 from core.llm import LLMMessage, LLMProvider
 from core.metrics import record_llm_cost
+from core.profile import RetrievalBackend
 from core.prompt import PROMPT_VERSION
 from core.queue import QueueName
+from core.retrieval import search_facts_fts
 from core.spend import (
     BudgetState,
     SpendRedis,
@@ -72,6 +75,7 @@ UNSUPPORTED_CONTENT_TEXT = "Пока я понимаю только текст."
 LOGGER = logging.getLogger(__name__)
 AUTOINJECT_THRESHOLD = 0.80
 AUTOINJECT_LIMIT = 5
+AUTOINJECT_FTS_LIMIT = 10
 SOFT_REFUSE_TEXT = (
     "На сегодня дневной лимит ассистента исчерпан. Продолжим после полуночи — "
     "или напишите /feedback, если лимит мешает"
@@ -109,6 +113,7 @@ class AgentProcessor:
         embeddings: EmbeddingsProvider | None = None,
         queue_redis: AgentRedis | None = None,
         prompt_version: str = PROMPT_VERSION,
+        retrieval: RetrievalBackend = RetrievalBackend.VECTOR,
     ) -> None:
         self._provider = provider
         self._dispatcher = dispatcher
@@ -119,6 +124,7 @@ class AgentProcessor:
         self._embeddings = embeddings
         self._queue_redis = queue_redis
         self._prompt_version = prompt_version
+        self._retrieval = retrieval
         self._background_tasks: set[asyncio.Task[None]] = set()
 
     async def process(
@@ -161,6 +167,7 @@ class AgentProcessor:
             text,
             self._embeddings,
             self._logger,
+            self._retrieval,
         )
         built = build_context(
             _dynamics(context.timezone, context.plan),
@@ -347,7 +354,7 @@ class AgentProcessor:
             period = datetime.now(ZoneInfo(context.timezone)).strftime("%Y%m%d")
             if (
                 envelope.kind in {"text", "agent_task"}
-                and snapshot.budget_rub.used >= Decimal("0.8") * snapshot.budget_rub.limit
+                and _approaching(snapshot.budget_rub)
                 and await claim_limit_notice(
                     self._queue_redis, LimitAxis.BUDGET, context.user_id, period
                 )
@@ -355,7 +362,7 @@ class AgentProcessor:
                 await self._send(context.chat_id, LIMIT_APPROACH_BUDGET_TEXT)
             if (
                 envelope.kind == "text"
-                and snapshot.messages.used >= Decimal("0.8") * snapshot.messages.limit
+                and _approaching(snapshot.messages)
                 and await claim_limit_notice(
                     self._queue_redis, LimitAxis.MESSAGES, context.user_id, period
                 )
@@ -480,9 +487,12 @@ async def _load_memory_facts(
     text: str,
     embeddings: EmbeddingsProvider | None,
     logger: logging.Logger,
+    retrieval: RetrievalBackend = RetrievalBackend.VECTOR,
 ) -> tuple[str, ...]:
     """Retrieve relevant user facts without allowing memory outages to stop a task."""
 
+    if retrieval is RetrievalBackend.FTS:
+        return await _load_memory_facts_fts(pool, context, text)
     if embeddings is None:
         _memory_warning(logger, "memory autoinject skipped: memory disabled")
         return ()
@@ -520,6 +530,40 @@ async def _load_memory_facts(
                 [row["id"] for row in selected],
             )
     return tuple(str(row["text"]) for row in selected)
+
+
+async def _load_memory_facts_fts(
+    pool: asyncpg.Pool,
+    context: TaskContext,
+    text: str,
+) -> tuple[str, ...]:
+    """Inject facts matched by full text search, with no embeddings service at all.
+
+    Twice the vector branch's allowance, because full text search misses
+    paraphrases that share no word stems and a wider net partly compensates
+    (plan section 4.1).
+    """
+
+    async with user_transaction(pool, context.user_id) as connection:
+        rows = await search_facts_fts(connection, text, AUTOINJECT_FTS_LIMIT)
+        if rows:
+            await connection.execute(
+                "UPDATE memory_facts SET last_used_at = now() WHERE id = ANY($1::uuid[])",
+                [row["id"] for row in rows],
+            )
+    return tuple(str(row["text"]) for row in rows)
+
+
+def _approaching(usage: LimitUsage) -> bool:
+    """Whether this axis is at 80% of its allowance.
+
+    An axis the profile has lifted is never approaching anything: there is
+    nothing to divide by and nothing to warn about (plan section 5A).
+    """
+
+    if usage.limit is None:
+        return False
+    return Decimal(usage.used) >= Decimal("0.8") * Decimal(usage.limit)
 
 
 def _memory_warning(logger: logging.Logger, message: str) -> None:

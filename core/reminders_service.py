@@ -7,8 +7,8 @@ from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from core.calendar_view import CalendarTask
+from core.profile import profile_limits
 
-MAX_ACTIVE_REMINDERS = 25
 TITLE_MAX_LENGTH = 80
 ScheduledKind = Literal["reminder", "agent_task"]
 
@@ -71,7 +71,7 @@ async def create_reminder(
         WHERE kind = 'reminder' AND status = 'active'
         """
     )
-    if _integer(active_count or 0) >= MAX_ACTIVE_REMINDERS:
+    if _integer(active_count or 0) >= profile_limits().active_reminders:
         raise ActiveReminderLimitReached
     reminder_id = await connection.fetchval(
         """

@@ -21,8 +21,10 @@ from core.context import TaskContext
 from core.db import user_transaction
 from core.llm import ToolDefinition
 from core.metrics import active_metrics
+from core.profile import settings_from_env
 
 LOGGER = logging.getLogger(__name__)
+TOOL_COUNTER_TTL_SECONDS = 2 * 86_400
 ToolStatus = Literal["ok", "error", "pending_confirmation"]
 ButtonRows = list[list[tuple[str, str]]]
 ConfirmationSender = Callable[[int, str, ButtonRows], Awaitable[None]]
@@ -83,6 +85,12 @@ class ToolSpec:
     risk: RiskLevel
     handler: ToolHandler
     daily_limit: int | None = None
+    daily_limit_scalable: bool = True
+    """Whether the profile multiplier applies (plan section 5B).
+
+    ``False`` marks a limit that is a property of the action rather than of the
+    tariff: ``set_timezone`` is a once-a-day operation on any size of server.
+    """
 
     def to_llm_definition(self) -> ToolDefinition:
         """Produce the deliberately small JSON Schema passed to the LLM."""
@@ -248,9 +256,12 @@ class ToolRegistry:
                     error="Возможно, действие уже было выполнено. Повторная отправка отключена.",
                 )
 
-        if spec.daily_limit is not None:
+        daily_limit = settings_from_env().scaled_tool_daily_limit(
+            spec.daily_limit, scalable=spec.daily_limit_scalable
+        )
+        if daily_limit is not None:
             count = await self._increment_daily_count(ctx, spec)
-            if count > spec.daily_limit:
+            if count > daily_limit:
                 result = ToolResult(
                     status="error",
                     error="Дневной лимит вызовов этого инструмента исчерпан. Попробуйте завтра.",
@@ -282,8 +293,9 @@ class ToolRegistry:
         day = datetime.now(UTC).strftime("%Y%m%d")
         key = f"tool_cnt:{ctx.user_id}:{spec.name}:{day}"
         count = await self._queue_redis.incr(key)
-        if count == 1:
-            await self._queue_redis.expire(key, 172_800)
+        # Unconditional: setting the TTL only on the first increment leaves the
+        # key immortal whenever that single EXPIRE is lost (plan S7).
+        await self._queue_redis.expire(key, TOOL_COUNTER_TTL_SECONDS)
         return count
 
     async def _create_pending_confirmation(

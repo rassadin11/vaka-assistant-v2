@@ -9,18 +9,18 @@ from uuid import UUID
 import pytest
 
 from core.limits import (
-    DAILY_VOICE_MINUTES_LIMIT,
     LIMIT_NOTICE_DAILY_TTL_SECONDS,
     LIMIT_NOTICE_MONTHLY_TTL_SECONDS,
     MESSAGE_COUNTER_TTL_SECONDS,
-    MONTHLY_PDF_PAGES_LIMIT,
     LimitAxis,
     add_message,
     claim_limit_notice,
     daily_message_limit,
+    daily_voice_minutes_limit,
     limits_snapshot,
     message_key,
     message_limit_reached,
+    monthly_pdf_pages_limit,
 )
 from core.spend import daily_budget_rub, spend_key
 
@@ -88,7 +88,14 @@ def test_message_key_uses_the_users_local_date(monkeypatch: pytest.MonkeyPatch) 
     assert message_key(USER_ID, "Asia/Vladivostok") == f"msg:{USER_ID}:20260712"
 
 
-async def test_add_message_increments_and_sets_ttl_only_on_first_increment() -> None:
+async def test_add_message_increments_and_refreshes_the_ttl_every_time() -> None:
+    """Refreshing on every increment, not just the first (plan S7).
+
+    Setting the expiry once means a single lost EXPIRE leaves the key immortal,
+    which on a noeviction instance is a leak. The key is named after the local
+    calendar date, so refreshing it does not widen the counting window.
+    """
+
     redis = FakeRedis()
     key = message_key(USER_ID, "Europe/Moscow")
 
@@ -96,7 +103,10 @@ async def test_add_message_increments_and_sets_ttl_only_on_first_increment() -> 
     await add_message(redis, USER_ID, "Europe/Moscow")
 
     assert redis.values[key] == "2"
-    assert redis.expire_calls == [(key, MESSAGE_COUNTER_TTL_SECONDS)]
+    assert redis.expire_calls == [
+        (key, MESSAGE_COUNTER_TTL_SECONDS),
+        (key, MESSAGE_COUNTER_TTL_SECONDS),
+    ]
 
 
 async def test_message_counter_redis_failures_are_open() -> None:
@@ -128,9 +138,9 @@ async def test_limits_snapshot_reads_all_existing_counter_key_formats() -> None:
     assert snapshot.budget_rub.used == Decimal("12.5")
     assert snapshot.budget_rub.limit == daily_budget_rub("trial")
     assert snapshot.voice_minutes.used == 3
-    assert snapshot.voice_minutes.limit == DAILY_VOICE_MINUTES_LIMIT
+    assert snapshot.voice_minutes.limit == daily_voice_minutes_limit()
     assert snapshot.pdf_pages.used == 44
-    assert snapshot.pdf_pages.limit == MONTHLY_PDF_PAGES_LIMIT
+    assert snapshot.pdf_pages.limit == monthly_pdf_pages_limit()
 
 
 async def test_limit_notice_claim_is_deduplicated_per_axis_period_and_uses_fixed_ttls() -> None:

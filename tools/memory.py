@@ -1,4 +1,4 @@
-"""Long-term user facts backed by pgvector and the internal embeddings service."""
+"""Long-term user facts, searched by pgvector or by Postgres full text search."""
 
 from __future__ import annotations
 
@@ -7,15 +7,17 @@ from uuid import UUID
 
 import asyncpg
 import uuid_utils
+from asyncpg.pool import PoolConnectionProxy
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.context import TaskContext
 from core.db import user_transaction
 from core.embeddings import EMBEDDING_DIMENSIONS, EmbeddingsProvider, EmbeddingsUnavailableError
+from core.profile import RetrievalBackend, profile_limits
+from core.retrieval import find_duplicate_fact_fts
 from core.tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
 
 DEDUPLICATION_THRESHOLD = 0.92
-MAX_FACTS_PER_USER = 500
 
 
 class RememberFactArgs(BaseModel):
@@ -29,12 +31,16 @@ class RememberFactArgs(BaseModel):
 def register_memory_tools(
     registry: ToolRegistry,
     app_pool: asyncpg.Pool,
-    embeddings: EmbeddingsProvider,
+    embeddings: EmbeddingsProvider | None,
+    *,
+    retrieval: RetrievalBackend = RetrievalBackend.VECTOR,
 ) -> None:
-    """Register memory only when its embeddings dependency is available."""
+    """Register memory; the caller guarantees the chosen backend is usable."""
 
     async def remember_fact(ctx: TaskContext, args: BaseModel) -> ToolResult:
-        return await _remember_fact(app_pool, embeddings, ctx, cast(RememberFactArgs, args))
+        return await _remember_fact(
+            app_pool, embeddings, ctx, cast(RememberFactArgs, args), retrieval=retrieval
+        )
 
     registry.register(
         ToolSpec(
@@ -50,34 +56,36 @@ def register_memory_tools(
 
 async def _remember_fact(
     pool: asyncpg.Pool,
-    embeddings: EmbeddingsProvider,
+    embeddings: EmbeddingsProvider | None,
     context: TaskContext,
     args: RememberFactArgs,
+    *,
+    retrieval: RetrievalBackend = RetrievalBackend.VECTOR,
 ) -> ToolResult:
-    try:
-        vectors = await embeddings.embed([args.fact], "passage")
-    except EmbeddingsUnavailableError:
-        return ToolResult(
-            status="error",
-            error="Память временно недоступна. Попробуйте позже.",
-            retryable=True,
-        )
-    vector = _single_vector(vectors)
-    vector_literal = vector_to_literal(vector)
+    vector_literal: str | None = None
+    if retrieval is RetrievalBackend.VECTOR:
+        if embeddings is None:
+            raise ValueError("the vector backend requires an embeddings provider")
+        try:
+            vectors = await embeddings.embed([args.fact], "passage")
+        except EmbeddingsUnavailableError:
+            return ToolResult(
+                status="error",
+                error="Память временно недоступна. Попробуйте позже.",
+                retryable=True,
+            )
+        vector_literal = vector_to_literal(_single_vector(vectors))
+
     async with user_transaction(pool, context.user_id) as connection:
-        nearest = await connection.fetchrow(
-            """
-            SELECT id, 1 - (embedding <=> $1::vector) AS sim
-            FROM memory_facts
-            ORDER BY embedding <=> $1::vector
-            LIMIT 1
-            """,
-            vector_literal,
+        duplicate = (
+            await _nearest_vector_duplicate(connection, vector_literal)
+            if vector_literal is not None
+            else await find_duplicate_fact_fts(connection, args.fact)
         )
-        if nearest is not None and float(nearest["sim"]) > DEDUPLICATION_THRESHOLD:
+        if duplicate is not None:
             await connection.execute(
                 "UPDATE memory_facts SET updated_at = now(), last_used_at = now() WHERE id = $1",
-                cast(UUID, nearest["id"]),
+                duplicate,
             )
             return ToolResult(status="ok", payload={"deduplicated": True})
 
@@ -94,7 +102,8 @@ async def _remember_fact(
             vector_literal,
         )
         fact_count = await connection.fetchval("SELECT count(*) FROM memory_facts")
-        if int(fact_count) > MAX_FACTS_PER_USER:
+        max_facts = profile_limits().facts_per_user
+        if int(fact_count) > max_facts:
             await connection.execute(
                 """
                 DELETE FROM memory_facts
@@ -104,9 +113,26 @@ async def _remember_fact(
                     OFFSET $1
                 )
                 """,
-                MAX_FACTS_PER_USER,
+                max_facts,
             )
     return ToolResult(status="ok", payload={"deduplicated": False})
+
+
+async def _nearest_vector_duplicate(
+    connection: PoolConnectionProxy[asyncpg.Record], vector_literal: str
+) -> UUID | None:
+    nearest = await connection.fetchrow(
+        """
+        SELECT id, 1 - (embedding <=> $1::vector) AS sim
+        FROM memory_facts
+        ORDER BY embedding <=> $1::vector
+        LIMIT 1
+        """,
+        vector_literal,
+    )
+    if nearest is None or float(nearest["sim"]) <= DEDUPLICATION_THRESHOLD:
+        return None
+    return cast(UUID, nearest["id"])
 
 
 def vector_to_literal(vector: list[float]) -> str:

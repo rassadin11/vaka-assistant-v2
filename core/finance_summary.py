@@ -32,6 +32,9 @@ FINANCE_SUMMARY_SYSTEM_PROMPT = (
 POSITIVE_CACHE_TTL_SECONDS = 6 * 60 * 60
 NEGATIVE_CACHE_TTL_SECONDS = 10 * 60
 LOCK_TTL_SECONDS = 30
+# Comfortably longer than the cached summary it invalidates: if the generation
+# counter expired first, a stale summary would become reachable again.
+GENERATION_TTL_SECONDS = 30 * 86_400
 LOCK_WAIT_SECONDS = 3.0
 LOCK_POLL_SECONDS = 0.1
 DESCRIPTION_LIMIT = 80
@@ -57,6 +60,8 @@ class FinanceSummaryRedis(Protocol):
     def delete(self, *names: str) -> Awaitable[Any]: ...
 
     def incr(self, name: str) -> Awaitable[Any]: ...
+
+    def expire(self, name: str, seconds: int) -> Awaitable[Any]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +96,9 @@ async def invalidate_finance_generation(redis: FinanceSummaryRedis, user_id: UUI
 
     try:
         await redis.incr(generation_key(user_id))
+        # Unconditional: setting the TTL only on the first increment leaves the
+        # key immortal whenever that single EXPIRE is lost (plan S7).
+        await redis.expire(generation_key(user_id), GENERATION_TTL_SECONDS)
     except Exception:
         LOGGER.warning("finance summary generation invalidation failed", exc_info=True)
 

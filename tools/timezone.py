@@ -47,6 +47,9 @@ def register_timezone_tools(registry: ToolRegistry, app_pool: asyncpg.Pool) -> N
             risk=RiskLevel.MUTATING_INTERNAL,
             handler=set_timezone,
             daily_limit=3,
+            # Changing your timezone is a once-in-a-while act, not a tariff
+            # allowance: the small profile must not multiply it (plan 5B).
+            daily_limit_scalable=False,
         )
     )
 

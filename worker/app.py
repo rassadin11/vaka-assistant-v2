@@ -269,8 +269,9 @@ class Worker:
 
             attempt_key = _attempt_key(envelope.update_id)
             process_attempt = await self._cache_redis.incr(attempt_key)
-            if process_attempt == 1:
-                await self._cache_redis.expire(attempt_key, WORKER_ATTEMPT_TTL_SECONDS)
+            # Unconditional: setting the TTL only on the first increment leaves
+            # the key immortal whenever that single EXPIRE is lost (plan S7).
+            await self._cache_redis.expire(attempt_key, WORKER_ATTEMPT_TTL_SECONDS)
             if process_attempt > self._config.max_deliveries:
                 # Record the number of processing attempts actually made, not
                 # the delivery on which the message was diverted to the DLQ.

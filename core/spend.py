@@ -12,6 +12,7 @@ from typing import Protocol
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+from core.profile import profile_limits
 from core.time_keys import local_date_key
 
 SPEND_TTL_SECONDS = 3 * 86_400
@@ -74,9 +75,12 @@ async def get_spent_rub(queue_redis: SpendRedis, user_id: UUID, timezone: str) -
 def daily_budget_rub(plan: str) -> Decimal:
     """Return the configured daily RUB budget for a user plan."""
 
+    default = _daily_default_budget()
     if plan == "pro":
-        return PRO_DAILY_BUDGET_RUB
-    return _daily_default_budget()
+        # Never below the profile's own floor: the small profile raises the base
+        # budget well past the prod pro tier.
+        return max(PRO_DAILY_BUDGET_RUB, default)
+    return default
 
 
 def budget_state(spent: Decimal, budget: Decimal) -> BudgetState:
@@ -103,7 +107,9 @@ def _usd_rub_rate() -> Decimal:
 
 
 def _daily_default_budget() -> Decimal:
-    return _decimal_from_env("DAILY_BUDGET_RUB_DEFAULT", DEFAULT_DAILY_BUDGET_RUB)
+    # The daily budget is a runaway-spend fuse, not a tariff: the small profile
+    # raises it rather than removing it (plan section 5A).
+    return profile_limits().daily_budget_rub
 
 
 def _decimal_from_env(name: str, default: Decimal) -> Decimal:

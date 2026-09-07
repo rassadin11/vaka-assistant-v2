@@ -7,7 +7,14 @@ from collections.abc import Awaitable
 from typing import Any
 
 from core.envelope import UpdateEnvelope
-from core.queue import CONSUMER_GROUPS, DLQ_STREAM, USER_DLQ_MESSAGE, QueueName, stream_key
+from core.queue import (
+    CONSUMER_GROUPS,
+    DLQ_MAXLEN,
+    DLQ_STREAM,
+    USER_DLQ_MESSAGE,
+    QueueName,
+    stream_key,
+)
 from worker.app import RETRY_NOTICE_TEXT, Worker, WorkerConfig
 from worker.processor import Processor
 from worker.reply import MiniAppButton, WorkerReply
@@ -40,6 +47,7 @@ class FakeQueueRedis:
         self.read_calls: list[tuple[str, int | None]] = []
         self.acked: list[tuple[str, str, str]] = []
         self.dlq_entries: list[tuple[str, dict[str, str]]] = []
+        self.xadd_kwargs: list[tuple[str, dict[str, Any]]] = []
         self.groups_created: list[tuple[str, str]] = []
         self.autoclaim_responses: dict[str, list[tuple[str, dict[str, str]]]] = {}
         self.pending_range_responses: dict[tuple[str, str], list[list[dict[str, object]]]] = {}
@@ -114,7 +122,7 @@ class FakeQueueRedis:
         return 1
 
     async def xadd(self, name: str, fields: dict[str, str], **kwargs: Any) -> str:
-        del kwargs
+        self.xadd_kwargs.append((name, kwargs))
         if name == DLQ_STREAM:
             self.dlq_entries.append((name, fields))
         return "9-0"
@@ -404,6 +412,21 @@ async def test_three_started_attempts_move_the_next_delivery_to_dlq() -> None:
     assert queue_redis.dlq_entries[0][1]["delivery_count"] == "3"
     assert cache_redis.deleted.count("attempts:457") == 1
     assert callbacks.admin
+
+
+async def test_dead_letter_stream_is_bounded_like_the_working_streams() -> None:
+    """An untrimmed DLQ grows until writes fail, which stops the queue (plan S7)."""
+
+    queue_redis = FakeQueueRedis()
+    cache_redis = FakeCacheRedis()
+    envelope = _envelope(update_id=459)
+    worker, _ = _worker(queue_redis, cache_redis, processor=FailingProcessor())
+    for _ in range(4):
+        queue_redis.read_responses["interactive"].append(_read_response("interactive", envelope))
+        assert await worker.run_once()
+
+    dlq_calls = [kwargs for name, kwargs in queue_redis.xadd_kwargs if name == DLQ_STREAM]
+    assert dlq_calls == [{"maxlen": DLQ_MAXLEN, "approximate": True}]
 
 
 async def test_first_failed_attempt_sends_retry_notice_once_across_retries() -> None:

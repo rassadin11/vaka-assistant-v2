@@ -13,14 +13,19 @@ from PIL import Image
 
 from core.context import TaskContext
 from core.envelope import UpdateEnvelope
-from worker.documents import MAX_MONTHLY_PAGES, MONTHLY_LIMIT_TEXT, _monthly_pages_key
+from core.limits import monthly_pdf_pages_limit
+from core.profile import profile_limits
+from worker.documents import MONTHLY_LIMIT_TEXT, _monthly_pages_key
 from worker.photos import (
     EMPTY_PHOTO_TEXT,
-    MAX_PHOTO_BYTES,
     PHOTO_OCR_UNAVAILABLE_TEXT,
-    PHOTO_TOO_LARGE_TEXT,
+    PHOTO_TOO_LARGE_TEMPLATE,
     PhotoOcrProcessor,
 )
+
+
+def _photo_limit() -> int:
+    return profile_limits().max_photo_bytes
 
 
 class FakeRedis:
@@ -151,10 +156,9 @@ async def test_oversized_photo_is_rejected_before_download() -> None:
 
     processor = PhotoOcrProcessor(FakeRedis(), download, RecordingInner())  # type: ignore[arg-type]
 
-    assert (
-        await processor.process(_envelope(size=MAX_PHOTO_BYTES + 1), _context())
-        == PHOTO_TOO_LARGE_TEXT
-    )
+    assert await processor.process(
+        _envelope(size=_photo_limit() + 1), _context()
+    ) == PHOTO_TOO_LARGE_TEMPLATE.format(megabytes=_photo_limit() // (1024 * 1024))
     assert downloads == 0
 
 
@@ -176,7 +180,7 @@ async def test_missing_tesseract_returns_unavailable_reply(
 
 async def test_monthly_page_limit_rejects_without_agent_or_download() -> None:
     context = _context()
-    redis = FakeRedis({_monthly_pages_key(context): str(MAX_MONTHLY_PAGES)})
+    redis = FakeRedis({_monthly_pages_key(context): str(monthly_pdf_pages_limit())})
     inner = RecordingInner()
     processor = PhotoOcrProcessor(
         redis,

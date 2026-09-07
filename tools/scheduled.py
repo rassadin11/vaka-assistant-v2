@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from core.context import TaskContext
 from core.db import user_transaction
+from core.profile import profile_limits
 from core.reminders_service import (
     ScheduledTaskNotFound,
     ScheduledTaskStateConflict,
@@ -20,7 +21,6 @@ from core.reminders_service import (
 )
 from core.tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
 
-MAX_ACTIVE_SCHEDULED_TASKS = 10
 PROMPT_MAX_LENGTH = 1_000
 TITLE_MAX_LENGTH = 80
 CRON_MAX_LENGTH = 100
@@ -121,7 +121,7 @@ async def _schedule_task(
             WHERE kind = 'agent_task' AND status = 'active'
             """
         )
-        if int(active_count or 0) >= MAX_ACTIVE_SCHEDULED_TASKS:
+        if int(active_count or 0) >= profile_limits().active_scheduled_tasks:
             return ToolResult(
                 status="error",
                 error="Достигнут лимит: одновременно можно иметь не более 10 активных задач.",

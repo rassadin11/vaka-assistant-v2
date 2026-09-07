@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from core.context import TaskContext
 from core.embeddings import EmbeddingsProvider
 from core.finance_summary import FinanceSummaryRedis
+from core.profile import RetrievalBackend
 from core.tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
 from tools.clock import get_current_time
 from tools.documents import register_document_tools
@@ -54,6 +55,7 @@ def register_builtin_tools(
     embeddings: EmbeddingsProvider | None = None,
     cache_redis: CacheRedis | None = None,
     searxng_url: str = "http://127.0.0.1:8091",
+    retrieval: RetrievalBackend = RetrievalBackend.VECTOR,
 ) -> None:
     """Register the intentionally small stage-4 baseline in stable order."""
 
@@ -78,9 +80,11 @@ def register_builtin_tools(
         register_persona_tools(registry, app_pool)
         register_timezone_tools(registry, app_pool)
         register_notes_tools(registry, app_pool)
-        register_document_tools(registry, app_pool, embeddings)
-        if embeddings is not None:
-            register_memory_tools(registry, app_pool, embeddings)
+        register_document_tools(registry, app_pool, embeddings, retrieval=retrieval)
+        # Memory needs a way to search, not embeddings specifically: with full
+        # text search the tools work without any embeddings service at all.
+        if embeddings is not None or retrieval is RetrievalBackend.FTS:
+            register_memory_tools(registry, app_pool, embeddings, retrieval=retrieval)
     if cache_redis is None:
         raise ValueError("cache_redis is required to register built-in web tools")
     register_web_tools(registry, cache_redis, searxng_url)

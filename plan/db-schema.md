@@ -12,6 +12,7 @@
 - **Роли БД**: `migrator` (владелец таблиц, только Alembic), `app` (рабочая, RLS активна), `service` (BYPASSRLS — шедулер-тик, outbox-процессор, фоновый OAuth-refresh, админ-команды, broadcast; всё, что по определению работает поперёк пользователей), `metrics_ro` (добавлена 2026-07-12 для 6.2: только SELECT на users/messages/usage/tool_calls_log, BYPASSRLS — кросс-пользовательские агрегаты продуктовых дашбордов Grafana; из приложения не используется, только datasource Grafana).
 - **RLS-шаблон**: `USING (user_id = NULLIF(current_setting('app.user_id', true), '')::uuid)` на каждой таблице с колонкой user_id; для users — то же с `id =`. Форма с `missing_ok=true` + NULLIF выбрана осознанно (уточнение 2026-07-09 при реализации 1.3): при неустановленной переменной запрос возвращает 0 строк (fail-closed), а не ошибку — ровно поведение, требуемое приёмкой 1.3; строгая форма `current_setting('app.user_id')` кидала бы исключение. CI-тест: каждая таблица с колонкой user_id имеет политику.
 - **Vector-колонки — `vector(1024)` и HNSW-индексы (`vector_cosine_ops`)** в memory_facts/doc_chunks создаются сразу в v1: эмбеддинги решены — локальная модель, оба кандидата (bge-m3, multilingual-e5-large) дают 1024 измерения, финальный выбор на 4.4 схему не меняет.
+- **Полнотекстовый поиск (добавлено 2026-09-07, задача S3 профиля small — plan/small-profile.md §4.1)**: в memory_facts и doc_chunks — генерируемая колонка `text_tsv tsvector GENERATED ALWAYS AS (to_tsvector('russian', text)) STORED` + GIN-индекс, плюс расширение `pg_trgm` (сигнал `similarity()` про запас, когда стеммер не дал ничего). Колонка именно генерируемая: значение поддерживает СУБД, отдельного шага переиндексации нет ни при вставке, ни при `pg_restore --data-only` (важно для S18). Конфигурация словаря задана явно (`'russian'`), потому что одноаргументная `to_tsvector(text)` зависит от `default_text_search_config` и не IMMUTABLE — генерируемая колонка её не примет. **Схема общая для обоих профилей**: `prod` продолжает искать векторами и колонку не читает, `small` читает её вместо `embedding`; выбор — флагом `RETRIEVAL_BACKEND` (S4). Векторные колонки и HNSW-индексы остаются в схеме в обоих профилях — на пустых таблицах они бесплатны, а единый набор миграций дороже мелкой экономии.
 - **Партиционирование**: tool_calls_log и usage — по месяцу (`created_at`), pg_partman; ключ партиции входит в PK. Ретеншн партиций — отложенное обсуждение №9 (сроки хранения).
 - **Хранение сообщений**: бессрочно до GDPR-удаления пользователя; суммаризация ничего не стирает.
 
@@ -66,9 +67,11 @@ memory_facts
   text            text NOT NULL
   last_used_at    timestamptz NOT NULL DEFAULT now()   -- вытеснение старейших при лимите 500 (реестр 7.1)
   created_at / updated_at                    -- updated_at обновляется дедупликацией (cosine > 0.92)
-  embedding       vector(1024)
+  embedding       vector(1024)               -- пусто в профиле small (эмбеддингов нет)
+  text_tsv        tsvector GENERATED ALWAYS AS (to_tsvector('russian', text)) STORED
 INDEX (user_id, last_used_at)
 INDEX HNSW (embedding vector_cosine_ops)
+INDEX GIN (text_tsv)
 ```
 
 ```
@@ -144,9 +147,11 @@ doc_chunks
   chunk_index     int
   text            text NOT NULL
   tokens          int
-  embedding       vector(1024)
+  embedding       vector(1024)               -- пусто в профиле small (эмбеддингов нет)
+  text_tsv        tsvector GENERATED ALWAYS AS (to_tsvector('russian', text)) STORED
 INDEX (doc_id), INDEX (user_id)
 INDEX HNSW (embedding vector_cosine_ops)
+INDEX GIN (text_tsv)
 ```
 
 ```

@@ -10,6 +10,8 @@ from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from core.context import TaskContext
 from core.envelope import UpdateEnvelope
 from core.timezones import CITY_TZ, TIMEZONE_BUTTONS, VALID_TIMEZONES
@@ -18,6 +20,7 @@ from worker.onboarding import (
     ASSISTANT_CAPABILITIES_TEXT,
     CHANGE_TIMEZONE_PROMPT_TEXT,
     HELP_TEXT,
+    NOT_ADMITTED_TEXT,
     RECURRING_REMINDERS_SHIFTED_TEXT,
     REJECTED_TEXT,
     START_TIMEZONE_PROMPT_TEXT,
@@ -258,6 +261,80 @@ def _processor(
         notify_admin=recorder.notify_admin,
         admin_ids=admin_ids,
     )
+
+
+async def test_allow_list_refuses_a_stranger_without_creating_a_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stranger must not reach the database at all (plan S12)."""
+
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "101,102")
+    pool, cache, recorder = FakePool(), FakeCache(), Recorder()
+    processor = _processor(pool, cache, recorder)
+
+    reply = await processor.process(_envelope(tg_user_id=777, chat_id=777, text="привет"))
+
+    assert reply == NOT_ADMITTED_TEXT
+    assert pool.users == {}
+    assert recorder.admin == []
+
+
+async def test_allow_list_refuses_at_most_once_a_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "101")
+    pool, cache, recorder = FakePool(), FakeCache(), Recorder()
+    processor = _processor(pool, cache, recorder)
+
+    first = await processor.process(_envelope(tg_user_id=777, chat_id=777, text="раз"))
+    second = await processor.process(_envelope(tg_user_id=777, chat_id=777, text="два"))
+
+    assert first == NOT_ADMITTED_TEXT
+    assert second is None
+    assert pool.users == {}
+
+
+async def test_a_listed_user_onboards_with_no_admin_involved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "101")
+    pool, cache, recorder = FakePool(), FakeCache(), Recorder()
+    processor = _processor(pool, cache, recorder)
+
+    reply = await processor.process(_envelope(tg_user_id=101, chat_id=501, text="hello"))
+
+    assert reply is None
+    assert pool.users[101]["status"] == "active"
+
+
+async def test_an_admin_is_admitted_even_when_absent_from_the_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two separate settings: an owner in only one of them must not be locked out."""
+
+    monkeypatch.setenv("ALLOWED_TELEGRAM_IDS", "101")
+    pool, cache, recorder = FakePool(), FakeCache(), Recorder()
+    processor = _processor(pool, cache, recorder, admin_ids=(900,))
+
+    reply = await processor.process(_envelope(tg_user_id=900, chat_id=900, text="hello"))
+
+    assert reply is None
+    assert pool.users[900]["status"] == "active"
+
+
+async def test_an_unset_allow_list_changes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prod behaviour is untouched: no list, no gate."""
+
+    monkeypatch.delenv("ALLOWED_TELEGRAM_IDS", raising=False)
+    pool, cache, recorder = FakePool(), FakeCache(), Recorder()
+    processor = _processor(pool, cache, recorder)
+
+    reply = await processor.process(_envelope(tg_user_id=777, chat_id=777, text="hello"))
+
+    assert reply is None
+    assert pool.users[777]["status"] == "active"
 
 
 async def test_first_contact_creates_active_user_and_prompts_for_timezone() -> None:

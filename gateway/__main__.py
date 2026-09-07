@@ -34,6 +34,9 @@ def main() -> NoReturn:
     if command == "set-webhook":
         asyncio.run(_set_webhook())
         raise SystemExit(0)
+    if command == "delete-webhook":
+        asyncio.run(_delete_webhook(drop_pending="--drop-pending" in sys.argv[2:]))
+        raise SystemExit(0)
     if command == "set-menu-button":
         asyncio.run(_set_menu_button())
         raise SystemExit(0)
@@ -93,6 +96,37 @@ async def _set_webhook() -> None:
         )
     finally:
         await bot.session.close()
+
+
+async def _delete_webhook(*, drop_pending: bool = False) -> None:
+    """Take the webhook off the token so polling can start on it.
+
+    While a webhook is registered, ``getUpdates`` answers 409 Conflict and
+    polling never starts, so this is the first step of moving a token from the
+    webhook deployment to the polling one (plan section 4.8).
+
+    Pending updates are kept by default: Telegram holds what it could not
+    deliver while the old stack was down, and polling picks those up, so nobody
+    who wrote during the switchover is silently ignored. Deduplication lives in
+    Redis and does not survive the move, so a message the old stack answered but
+    failed to acknowledge can be answered twice -- ``--drop-pending`` trades that
+    away for losing the backlog instead.
+    """
+
+    bot = Bot(telegram_bot_token())
+    try:
+        await bot.delete_webhook(drop_pending_updates=drop_pending)
+        info = await bot.get_webhook_info()
+    finally:
+        await bot.session.close()
+    logging.getLogger(__name__).info(
+        "webhook deleted: url=%r pending=%s dropped=%s",
+        info.url,
+        info.pending_update_count,
+        drop_pending,
+    )
+    if info.url:
+        raise RuntimeError(f"webhook is still registered: {info.url}")
 
 
 async def _set_menu_button() -> None:

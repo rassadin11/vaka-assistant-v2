@@ -12,12 +12,13 @@ import pytest
 from pydantic import ValidationError
 
 from core.context import TaskContext
+from core.profile import profile_limits
 from core.tools import RiskLevel, ToolRegistry
 from tests.test_tools import FakePool as RegistryFakePool
 from tests.test_tools import FakeRedis
 from tools.notes import (
+    LIST_NOTES_LIMIT,
     MAX_NOTE_CONTENT_LENGTH,
-    MAX_NOTES_PER_USER,
     AppendToNoteArgs,
     DeleteNoteArgs,
     ReadNoteArgs,
@@ -32,6 +33,10 @@ from tools.notes import (
 
 USER_ID = UUID("018f0000-0000-7000-8000-000000000001")
 BASE_TIME = datetime(2026, 7, 31, 9, 0, tzinfo=UTC)
+
+
+def _notes_limit() -> int:
+    return profile_limits().notes_per_user
 
 
 class FakeTransaction:
@@ -129,13 +134,14 @@ class FakeNotesConnection:
 
     async def fetch(self, query: str, *args: object) -> list[dict[str, Any]]:
         if "length(content) AS chars" in query:
+            limit = int(args[0])
             return [
                 {
                     "title": note["title"],
                     "updated_at": note["updated_at"],
                     "chars": len(note["content"]),
                 }
-                for note in self._sorted()
+                for note in self._sorted()[:limit]
             ]
         if "SELECT title" in query:
             limit = int(args[0])
@@ -252,7 +258,7 @@ async def test_append_resolves_an_existing_title_case_insensitively() -> None:
 
 
 async def test_upsert_refuses_a_new_note_beyond_the_limit_but_keeps_replacing() -> None:
-    pool = _filled_pool(MAX_NOTES_PER_USER)
+    pool = _filled_pool(_notes_limit())
 
     refused = await _upsert_note(
         pool,  # type: ignore[arg-type]
@@ -269,12 +275,12 @@ async def test_upsert_refuses_a_new_note_beyond_the_limit_but_keeps_replacing() 
     assert refused.retryable is False
     assert "Достигнут лимит 100 заметок" in (refused.error or "")
     assert "list_notes" in (refused.error or "")
-    assert len(pool.connection.notes) == MAX_NOTES_PER_USER
+    assert len(pool.connection.notes) == _notes_limit()
     assert replaced.status == "ok"
 
 
 async def test_append_refuses_a_new_note_beyond_the_limit_but_keeps_appending() -> None:
-    pool = _filled_pool(MAX_NOTES_PER_USER)
+    pool = _filled_pool(_notes_limit())
 
     refused = await _append_to_note(
         pool,  # type: ignore[arg-type]
@@ -290,7 +296,7 @@ async def test_append_refuses_a_new_note_beyond_the_limit_but_keeps_appending() 
     assert refused.status == "error"
     assert refused.retryable is False
     assert "Достигнут лимит 100 заметок" in (refused.error or "")
-    assert len(pool.connection.notes) == MAX_NOTES_PER_USER
+    assert len(pool.connection.notes) == _notes_limit()
     assert appended.status == "ok"
 
 
@@ -427,11 +433,32 @@ async def test_list_returns_titles_sizes_and_local_times_newest_first() -> None:
     result = await _list_notes(pool, _context("Asia/Yekaterinburg"))  # type: ignore[arg-type]
 
     assert result.payload["notes_count"] == 3
-    assert result.payload["notes_limit"] == MAX_NOTES_PER_USER
+    assert result.payload["notes_total"] == 3
+    assert result.payload["notes_limit"] == _notes_limit()
     notes = result.payload["notes"]
     assert [note["title"] for note in notes] == ["Тема 2", "Тема 1", "Тема 0"]
     assert notes[0]["chars"] == len("запись")
     assert notes[0]["updated_at"] == "2026-07-31T14:02:00+05:00"
+
+
+async def test_list_is_capped_and_says_how_many_notes_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap is a context budget: 300 rows would blow a whole request's budget.
+
+    The model is told the real total so it knows the view is partial and can
+    reach for read_note (prompt rule 16h).
+    """
+
+    monkeypatch.setenv("DEPLOYMENT_PROFILE", "small")
+    pool = _filled_pool(300)
+
+    result = await _list_notes(pool, _context("Europe/Moscow"))  # type: ignore[arg-type]
+
+    assert result.payload["notes_count"] == LIST_NOTES_LIMIT
+    assert len(result.payload["notes"]) == LIST_NOTES_LIMIT
+    assert result.payload["notes_total"] == 300
+    assert result.payload["notes_limit"] == 300
 
 
 def test_note_tools_are_registered_with_their_declared_risks_and_limits() -> None:

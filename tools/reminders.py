@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 from core.context import TaskContext
 from core.db import user_transaction
+from core.profile import profile_limits
 from core.reminders_service import (
     ActiveReminderLimitReached,
     ReminderTimeInPast,
@@ -129,7 +130,10 @@ async def _create_reminder(
         except ActiveReminderLimitReached:
             return ToolResult(
                 status="error",
-                error="Достигнут лимит: одновременно можно иметь не более 25 активных напоминаний.",
+                error=(
+                    "Достигнут лимит: одновременно можно иметь не более "
+                    f"{profile_limits().active_reminders} активных напоминаний."
+                ),
             )
     return ToolResult(
         status="ok",

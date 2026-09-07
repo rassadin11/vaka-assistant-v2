@@ -38,6 +38,12 @@ from core.llm_resilient import ResilientLLMProvider
 from core.logging_setup import setup_logging
 from core.metrics import active_metrics
 from core.model_router import RouteRequest, StaticModelRouter
+from core.profile import (
+    EmbeddingsBackend,
+    ProfileSettings,
+    RetrievalBackend,
+    settings_from_env,
+)
 from core.prompt import prompt_version_for_model
 from core.queue import CONSUMER_GROUPS, enqueue, redis_settings_from_env, stream_keys
 from core.registry_dispatcher import RegistryToolDispatcher
@@ -93,7 +99,9 @@ async def _run() -> None:
     config = config_from_env()
     admin_ids = admin_ids_from_env()
     plain_echo = _env_bool("WORKER_PLAIN_ECHO")
-    embeddings = _embeddings_provider_from_env()
+    profile = settings_from_env()
+    _apply_ocr_thread_limit(profile)
+    embeddings = _embeddings_provider_from_env(profile)
     service_pool: asyncpg.Pool | None = None
     app_pool: asyncpg.Pool | None = None
     if not plain_echo:
@@ -163,11 +171,24 @@ async def _run() -> None:
             embeddings,
             cache_redis,
             os.getenv("SEARXNG_URL", "http://127.0.0.1:8091").strip() or "http://127.0.0.1:8091",
+            profile.retrieval_backend,
         )
         inner = _active_inner_processor(
-            queue_redis, app_pool, send_reply, notify_admin, registry, embeddings
+            queue_redis,
+            app_pool,
+            send_reply,
+            notify_admin,
+            registry,
+            embeddings,
+            profile.retrieval_backend,
         )
-        document_processor = PdfIngestProcessor(app_pool, queue_redis, download_file, embeddings)
+        document_processor = PdfIngestProcessor(
+            app_pool,
+            queue_redis,
+            download_file,
+            embeddings,
+            retrieval=profile.retrieval_backend,
+        )
         photo_processor = PhotoOcrProcessor(queue_redis, download_file, inner)
         voice_processor = VoiceProcessor(
             app_pool,
@@ -460,6 +481,7 @@ def _active_inner_processor(
     notify_admin: NotifyAdminCallback,
     registry: ToolRegistry,
     embeddings: EmbeddingsProvider | None = None,
+    retrieval: RetrievalBackend = RetrievalBackend.VECTOR,
 ) -> AgentProcessor | EchoProcessor:
     """Choose the production agent only when its API key can be resolved."""
 
@@ -511,12 +533,35 @@ def _active_inner_processor(
         embeddings=embeddings,
         queue_redis=queue_redis,
         prompt_version=prompt_version,
+        retrieval=retrieval,
     )
 
 
-def _embeddings_provider_from_env() -> EmbeddingsProvider | None:
-    """Return a configured internal embeddings client, or explicitly disable memory."""
+def _apply_ocr_thread_limit(profile: ProfileSettings) -> None:
+    """Cap tesseract's thread pool for this process and its children.
 
+    ``pytesseract`` runs tesseract as a subprocess, which inherits this
+    environment, so setting it here makes the small profile's OCR peak
+    predictable even when compose forgets to. ``setdefault`` keeps an explicit
+    compose value winning (plan section 2).
+    """
+
+    limit = profile.limits.ocr_thread_limit
+    if limit is None:
+        return
+    os.environ.setdefault("OMP_THREAD_LIMIT", str(limit))
+
+
+def _embeddings_provider_from_env(profile: ProfileSettings) -> EmbeddingsProvider | None:
+    """Return a configured internal embeddings client, or explicitly disable it.
+
+    The small profile has no embeddings service to point at, so the backend flag
+    wins over any URL that happens to be left in the environment.
+    """
+
+    if profile.embeddings_backend is EmbeddingsBackend.NONE:
+        logging.getLogger(__name__).info("embeddings disabled by deployment profile")
+        return None
     url = os.getenv("EMBEDDINGS_URL", "").strip()
     if not url:
         logging.getLogger(__name__).warning("memory disabled")

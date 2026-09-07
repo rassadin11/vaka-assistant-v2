@@ -37,5 +37,14 @@ COPY --from=miniapp-build /miniapp/dist/ webapp/static/
 
 ENV PATH="/app/.venv/bin:$PATH"
 
+# tiktoken downloads its BPE table from an OpenAI CDN the first time an encoding
+# is created, and core/tokens.py creates one at import. Warming the cache at
+# build time means a container with no outbound internet still starts and still
+# counts tokens (plan S14).
+ENV TIKTOKEN_CACHE_DIR=/app/.tiktoken-cache
+RUN mkdir -p "$TIKTOKEN_CACHE_DIR" \
+    && python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')" \
+    && test -n "$(ls -A "$TIKTOKEN_CACHE_DIR")"
+
 # Entrypoints (gateway / worker / webapp) are selected by their Compose service.
 CMD ["python", "-c", "import core, gateway, worker, webapp, tools; print('personal-assistant image ok')"]

@@ -11,7 +11,7 @@ import pytest
 
 from core.context import TaskContext
 from core.envelope import UpdateEnvelope
-from core.limits import message_key
+from core.limits import daily_voice_minutes_limit, message_key
 from core.spend import spend_key
 from core.stt import MockSTTProvider, STTResult, STTUnavailableError
 from worker.onboarding import HINT_VOICE_TEXT
@@ -19,7 +19,6 @@ from worker.voice import (
     DAILY_LIMIT_TEXT,
     EMPTY_TRANSCRIPT_TEXT,
     LIMIT_APPROACH_VOICE_TEXT,
-    MAX_DAILY_VOICE_MINUTES,
     MESSAGE_LIMIT_TEXT,
     STT_UNAVAILABLE_TEXT,
     TOO_LONG_TEXT,
@@ -28,6 +27,12 @@ from worker.voice import (
     VoiceProcessor,
     _daily_minutes_key,
 )
+
+
+def _voice_limit() -> int:
+    limit = daily_voice_minutes_limit()
+    assert limit is not None
+    return limit
 
 
 class FakeRedis:
@@ -119,7 +124,7 @@ async def test_long_voice_is_rejected_before_download_or_counter() -> None:
 async def test_daily_limit_rejects_before_download() -> None:
     context = _context()
     key = _daily_minutes_key(context)
-    redis = FakeRedis({key: str(MAX_DAILY_VOICE_MINUTES)})
+    redis = FakeRedis({key: str(_voice_limit())})
     downloads = 0
 
     async def download(_file_id: str, _maximum: int) -> bytes:
@@ -137,7 +142,7 @@ async def test_daily_limit_rejects_before_download() -> None:
 
     assert await processor.process(_envelope(1), context) == DAILY_LIMIT_TEXT
     assert downloads == 0
-    assert redis.values[key] == str(MAX_DAILY_VOICE_MINUTES)
+    assert redis.values[key] == str(_voice_limit())
 
 
 async def test_success_rewrites_envelope_counts_utc_minutes_and_saves_usage(
@@ -315,7 +320,7 @@ async def test_voice_limit_approach_notifies_once_after_reaching_eighty_percent(
     assert sent == [
         (
             context.chat_id,
-            LIMIT_APPROACH_VOICE_TEXT.format(used=8, limit=MAX_DAILY_VOICE_MINUTES),
+            LIMIT_APPROACH_VOICE_TEXT.format(used=8, limit=_voice_limit()),
         ),
         (context.chat_id, HINT_VOICE_TEXT),
     ]

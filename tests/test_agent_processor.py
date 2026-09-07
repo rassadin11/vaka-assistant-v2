@@ -27,7 +27,7 @@ from worker.agent_processor import (
     SOFT_REFUSE_TEXT,
     AgentProcessor,
 )
-from worker.onboarding import HINT_FINANCE_TEXT, HINT_REMINDER_TEXT
+from worker.onboarding import HINT_FINANCE_TEXT, HINT_REMINDER_TEXT, HINT_TTL_SECONDS
 from worker.reply import WorkerReply
 
 
@@ -367,7 +367,7 @@ async def test_mini_app_button_is_only_added_to_relevant_interactive_answers(
         ("create_reminder", HINT_REMINDER_TEXT, "reminder"),
     ],
 )
-async def test_onboarding_tool_hint_is_sent_once_with_permanent_nx_key(
+async def test_onboarding_tool_hint_is_sent_once_under_a_bounded_nx_key(
     monkeypatch: pytest.MonkeyPatch,
     tool_name: str,
     hint_text: str,
@@ -384,7 +384,9 @@ async def test_onboarding_tool_hint_is_sent_once_with_permanent_nx_key(
         async def set(
             self, name: str, value: str, *, ex: int | None = None, nx: bool = False
         ) -> bool:
-            assert ex is None
+            # Bounded, not permanent: an immortal key leaks on the small
+            # profile's single noeviction instance (plan S7).
+            assert ex == HINT_TTL_SECONDS
             if nx and name in self.values:
                 return False
             self.values[name] = value

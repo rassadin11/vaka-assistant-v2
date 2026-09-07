@@ -14,13 +14,19 @@ import asyncpg
 
 from core.context import TaskContext
 from core.envelope import UpdateEnvelope
-from core.limits import LimitAxis, claim_limit_notice, message_limit_reached
+from core.limits import (
+    LimitAxis,
+    claim_limit_notice,
+    daily_voice_minutes_limit,
+    message_limit_reached,
+)
 from core.metrics import active_metrics, record_llm_cost
+from core.profile import profile_limits
 from core.spend import BudgetState, add_spend, budget_state, daily_budget_rub, get_spent_rub
 from core.stt import STTProvider, STTUnavailableError
 from core.usage_store import save_stt_usage
 from worker.app import SendReplyCallback
-from worker.documents import MAX_DOCUMENT_BYTES, DownloadFile, QueueRedis
+from worker.documents import DownloadFile, QueueRedis
 from worker.onboarding import (
     HINT_VOICE_TEXT,
     OnboardingHintAxis,
@@ -30,7 +36,6 @@ from worker.processor import ContextualProcessor
 from worker.reply import WorkerReply
 
 MAX_VOICE_DURATION_SECONDS = 300
-MAX_DAILY_VOICE_MINUTES = 10
 VOICE_COUNTER_TTL_SECONDS = 2 * 86_400
 
 TOO_LONG_TEXT = "Голосовые длиннее 5 минут не поддерживаются."
@@ -101,7 +106,7 @@ class VoiceProcessor:
             file_id = envelope.payload.get("tg_file_id")
             if not isinstance(file_id, str) or not file_id:
                 return STT_UNAVAILABLE_TEXT
-            audio = await self._download_file(file_id, MAX_DOCUMENT_BYTES)
+            audio = await self._download_file(file_id, profile_limits().max_document_bytes)
             try:
                 result = await self._stt_provider.transcribe(audio, "voice.ogg")
             except STTUnavailableError:
@@ -144,15 +149,19 @@ class VoiceProcessor:
             return STT_UNAVAILABLE_TEXT
 
     async def _within_daily_limit(self, context: TaskContext, minutes: int) -> bool:
+        limit = daily_voice_minutes_limit()
+        if limit is None:
+            return True
         raw_count = await self._queue_redis.get(_daily_minutes_key(context))
         raw_text = raw_count.decode("utf-8") if isinstance(raw_count, bytes) else raw_count
         current = int(raw_text or "0")
-        return current + minutes <= MAX_DAILY_VOICE_MINUTES
+        return current + minutes <= limit
 
     async def _increment_minutes(self, context: TaskContext, minutes: int) -> int:
         value = await self._queue_redis.incrby(_daily_minutes_key(context), minutes)
-        if value == minutes:
-            await self._queue_redis.expire(_daily_minutes_key(context), VOICE_COUNTER_TTL_SECONDS)
+        # Unconditional: setting the TTL only on the first increment leaves the
+        # key immortal whenever that single EXPIRE is lost (plan S7).
+        await self._queue_redis.expire(_daily_minutes_key(context), VOICE_COUNTER_TTL_SECONDS)
         return value
 
     def _schedule_limit_approach_notification(
@@ -160,7 +169,9 @@ class VoiceProcessor:
     ) -> None:
         """Queue a UTC-day voice warning without delaying transcription delivery."""
 
-        if self._send is None or used_minutes < 0.8 * MAX_DAILY_VOICE_MINUTES:
+        limit = daily_voice_minutes_limit()
+        # A lifted limit has no 80 percent to reach (plan section 5A).
+        if self._send is None or limit is None or used_minutes < 0.8 * limit:
             return
         task = asyncio.create_task(self._notify_limit_approach(context, used_minutes))
         self._background_tasks.add(task)
@@ -179,7 +190,7 @@ class VoiceProcessor:
                 await self._send(
                     context.chat_id,
                     LIMIT_APPROACH_VOICE_TEXT.format(
-                        used=used_minutes, limit=MAX_DAILY_VOICE_MINUTES
+                        used=used_minutes, limit=daily_voice_minutes_limit()
                     ),
                 )
         except Exception:

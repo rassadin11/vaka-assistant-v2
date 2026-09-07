@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -13,14 +12,12 @@ from typing import Protocol
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+from core.profile import profile_limits
 from core.spend import daily_budget_rub, spend_key
 from core.time_keys import local_date_key
 
 MESSAGE_COUNTER_TTL_SECONDS = 3 * 86_400
-DEFAULT_DAILY_MESSAGE_LIMIT = 100
 PRO_DAILY_MESSAGE_LIMIT = 200
-DAILY_VOICE_MINUTES_LIMIT = 10
-MONTHLY_PDF_PAGES_LIMIT = 200
 LIMIT_NOTICE_DAILY_TTL_SECONDS = 3 * 86_400
 LIMIT_NOTICE_MONTHLY_TTL_SECONDS = 40 * 86_400
 
@@ -55,7 +52,8 @@ class LimitUsage:
     """The used and allowed values for one tariff-limit axis."""
 
     used: int | Decimal
-    limit: int | Decimal
+    limit: int | Decimal | None
+    """``None`` means this axis has no limit in the active profile (plan 5A)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,12 +66,25 @@ class LimitsSnapshot:
     pdf_pages: LimitUsage
 
 
-def daily_message_limit(plan: str) -> int:
-    """Return the configured daily message allowance for a user plan."""
+def daily_message_limit(plan: str) -> int | None:
+    """Return the daily message allowance, or ``None`` when the profile lifts it."""
 
-    if plan == "pro":
-        return PRO_DAILY_MESSAGE_LIMIT
-    return _daily_default_message_limit()
+    default = profile_limits().daily_messages
+    if plan == "pro" and default is not None:
+        return max(PRO_DAILY_MESSAGE_LIMIT, default)
+    return default
+
+
+def daily_voice_minutes_limit() -> int | None:
+    """Return the daily voice allowance, or ``None`` when the profile lifts it."""
+
+    return profile_limits().daily_voice_minutes
+
+
+def monthly_pdf_pages_limit() -> int | None:
+    """Return the monthly PDF page allowance, or ``None`` when the profile lifts it."""
+
+    return profile_limits().monthly_pdf_pages
 
 
 def message_key(user_id: UUID, timezone: str, current: datetime | None = None) -> str:
@@ -88,9 +99,12 @@ async def message_limit_reached(
 ) -> bool:
     """Return whether today's message allowance is consumed, failing open on Redis errors."""
 
+    limit = daily_message_limit(plan)
+    if limit is None:
+        return False
     try:
         value = await queue_redis.get(message_key(user_id, timezone))
-        return _as_int(value) >= daily_message_limit(plan)
+        return _as_int(value) >= limit
     except Exception:
         LOGGER.warning("daily message limit read failed", exc_info=True)
         return False
@@ -101,9 +115,10 @@ async def add_message(queue_redis: LimitsRedis, user_id: UUID, timezone: str) ->
 
     key = message_key(user_id, timezone)
     try:
-        value = await queue_redis.incr(key)
-        if value == 1:
-            await queue_redis.expire(key, MESSAGE_COUNTER_TTL_SECONDS)
+        await queue_redis.incr(key)
+        # Unconditional: setting the TTL only on the first increment leaves the
+        # key immortal whenever that single EXPIRE is lost (plan S7).
+        await queue_redis.expire(key, MESSAGE_COUNTER_TTL_SECONDS)
     except Exception:
         LOGGER.warning("daily message increment failed", exc_info=True)
 
@@ -147,8 +162,8 @@ async def limits_snapshot(
     return LimitsSnapshot(
         messages=LimitUsage(messages, daily_message_limit(plan)),
         budget_rub=LimitUsage(spent_rub, daily_budget_rub(plan)),
-        voice_minutes=LimitUsage(voice_minutes, DAILY_VOICE_MINUTES_LIMIT),
-        pdf_pages=LimitUsage(pdf_pages, MONTHLY_PDF_PAGES_LIMIT),
+        voice_minutes=LimitUsage(voice_minutes, daily_voice_minutes_limit()),
+        pdf_pages=LimitUsage(pdf_pages, monthly_pdf_pages_limit()),
     )
 
 
@@ -169,18 +184,6 @@ def _voice_minutes_key(user_id: UUID, current: datetime) -> str:
 
 def _pdf_pages_key(user_id: UUID, current: datetime) -> str:
     return f"doc_pages:{user_id}:{current:%Y%m}"
-
-
-def _daily_default_message_limit() -> int:
-    value = os.getenv("DAILY_MESSAGE_LIMIT_DEFAULT")
-    if value is None or not value.strip():
-        return DEFAULT_DAILY_MESSAGE_LIMIT
-    try:
-        parsed = int(value)
-    except ValueError:
-        LOGGER.warning("invalid DAILY_MESSAGE_LIMIT_DEFAULT; using default")
-        return DEFAULT_DAILY_MESSAGE_LIMIT
-    return parsed
 
 
 def _as_int(value: str | bytes | None) -> int:

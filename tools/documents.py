@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import cast
 from zoneinfo import ZoneInfo
@@ -12,8 +13,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from core.context import TaskContext
 from core.db import user_transaction
 from core.embeddings import EmbeddingsProvider, EmbeddingsUnavailableError
+from core.profile import RetrievalBackend
+from core.retrieval import search_chunks_fts
 from core.tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
 from tools.memory import vector_to_literal
+
+SEARCH_RESULT_LIMIT = 6
 
 
 class SearchDocumentsArgs(BaseModel):
@@ -43,8 +48,10 @@ def register_document_tools(
     registry: ToolRegistry,
     app_pool: asyncpg.Pool,
     embeddings: EmbeddingsProvider | None,
+    *,
+    retrieval: RetrievalBackend = RetrievalBackend.VECTOR,
 ) -> None:
-    """Register always-available lifecycle tools and optional semantic search."""
+    """Register always-available lifecycle tools and optional content search."""
 
     async def list_documents(ctx: TaskContext, _args: BaseModel) -> ToolResult:
         return await _list_documents(app_pool, ctx)
@@ -70,11 +77,13 @@ def register_document_tools(
             handler=delete_document,
         )
     )
-    if embeddings is None:
+    if embeddings is None and retrieval is RetrievalBackend.VECTOR:
         return
 
     async def search_documents(ctx: TaskContext, args: BaseModel) -> ToolResult:
-        return await _search_documents(app_pool, embeddings, ctx, cast(SearchDocumentsArgs, args))
+        return await _search_documents(
+            app_pool, embeddings, ctx, cast(SearchDocumentsArgs, args), retrieval=retrieval
+        )
 
     registry.register(
         ToolSpec(
@@ -89,10 +98,21 @@ def register_document_tools(
 
 async def _search_documents(
     pool: asyncpg.Pool,
-    embeddings: EmbeddingsProvider,
+    embeddings: EmbeddingsProvider | None,
     context: TaskContext,
     args: SearchDocumentsArgs,
+    *,
+    retrieval: RetrievalBackend = RetrievalBackend.VECTOR,
 ) -> ToolResult:
+    if retrieval is RetrievalBackend.FTS:
+        async with user_transaction(pool, context.user_id) as connection:
+            records = await search_chunks_fts(
+                connection, args.query, args.doc_id, SEARCH_RESULT_LIMIT
+            )
+        return _search_result(records)
+
+    if embeddings is None:
+        raise ValueError("the vector backend requires an embeddings provider")
     try:
         vectors = await embeddings.embed([args.query], "query")
     except EmbeddingsUnavailableError:
@@ -113,11 +133,16 @@ async def _search_documents(
             WHERE d.status = 'ready'
               AND ($2::bigint IS NULL OR c.doc_id = $2)
             ORDER BY c.embedding <=> $1::vector
-            LIMIT 6
+            LIMIT $3
             """,
             vector,
             args.doc_id,
+            SEARCH_RESULT_LIMIT,
         )
+    return _search_result(records)
+
+
+def _search_result(records: Sequence[asyncpg.Record]) -> ToolResult:
     rows = [
         {
             "doc_id": int(record["doc_id"]),

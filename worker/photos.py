@@ -14,23 +14,22 @@ from PIL import Image, UnidentifiedImageError
 
 from core.context import TaskContext
 from core.envelope import UpdateEnvelope
-from core.limits import message_limit_reached
+from core.limits import message_limit_reached, monthly_pdf_pages_limit
+from core.profile import ProfileLimits, profile_limits
 from core.spend import BudgetState, budget_state, daily_budget_rub, get_spent_rub
 from worker.documents import (
-    MAX_MONTHLY_PAGES,
     MONTHLY_KEY_TTL_SECONDS,
     MONTHLY_LIMIT_TEXT,
     DownloadFile,
     QueueRedis,
     _monthly_pages_key,
+    downscaled,
 )
 from worker.processor import ContextualProcessor
 from worker.reply import WorkerReply
 from worker.voice import MESSAGE_LIMIT_TEXT, SOFT_REFUSE_TEXT
 
-MAX_PHOTO_BYTES = 10 * 1024 * 1024
-
-PHOTO_TOO_LARGE_TEXT = "Фото больше 10 МБ не поддерживаются."
+PHOTO_TOO_LARGE_TEMPLATE = "Фото больше {megabytes} МБ не поддерживаются."
 PHOTO_DOWNLOAD_UNAVAILABLE_TEXT = "Скачивание фото временно недоступно, пришлите ещё раз позже."
 PHOTO_OCR_UNAVAILABLE_TEXT = "Распознавание фото временно недоступно."
 INVALID_PHOTO_TEXT = "Не удалось обработать фото."
@@ -71,9 +70,11 @@ class PhotoOcrProcessor:
             payload = envelope.payload
             # Telegram may omit file_size; the download itself is capped, and the
             # post-download length check below still guards the limit.
+            limits = profile_limits()
+            max_bytes = limits.max_photo_bytes
             size = payload.get("size")
-            if isinstance(size, int) and not isinstance(size, bool) and size > MAX_PHOTO_BYTES:
-                return PHOTO_TOO_LARGE_TEXT
+            if isinstance(size, int) and not isinstance(size, bool) and size > max_bytes:
+                return _photo_too_large_text(max_bytes)
             file_id = payload.get("tg_file_id")
             if not isinstance(file_id, str) or not file_id or self._download_file is None:
                 return PHOTO_DOWNLOAD_UNAVAILABLE_TEXT
@@ -81,15 +82,15 @@ class PhotoOcrProcessor:
                 return MONTHLY_LIMIT_TEXT
 
             try:
-                content = await self._download_file(file_id, MAX_PHOTO_BYTES)
+                content = await self._download_file(file_id, max_bytes)
             except Exception:
                 self._logger.warning("photo download failed", exc_info=True)
                 return PHOTO_DOWNLOAD_UNAVAILABLE_TEXT
-            if len(content) > MAX_PHOTO_BYTES:
-                return PHOTO_TOO_LARGE_TEXT
+            if len(content) > max_bytes:
+                return _photo_too_large_text(max_bytes)
 
             try:
-                ocr_text = await asyncio.to_thread(_ocr_photo, content)
+                ocr_text = await asyncio.to_thread(_ocr_photo, content, limits)
             except _OcrUnavailableError:
                 return PHOTO_OCR_UNAVAILABLE_TEXT
             except (UnidentifiedImageError, OSError, ValueError):
@@ -116,15 +117,19 @@ class PhotoOcrProcessor:
             return INVALID_PHOTO_TEXT
 
     async def _within_monthly_limit(self, context: TaskContext) -> bool:
+        limit = monthly_pdf_pages_limit()
+        if limit is None:
+            return True
         raw_count = await self._queue_redis.get(_monthly_pages_key(context))
         raw_text = raw_count.decode("utf-8") if isinstance(raw_count, bytes) else raw_count
-        return int(raw_text or "0") + 1 <= MAX_MONTHLY_PAGES
+        return int(raw_text or "0") + 1 <= limit
 
     async def _increment_monthly_pages(self, context: TaskContext) -> int:
         key = _monthly_pages_key(context)
         used_pages = await self._queue_redis.incrby(key, 1)
-        if used_pages == 1:
-            await self._queue_redis.expire(key, MONTHLY_KEY_TTL_SECONDS)
+        # Unconditional: setting the TTL only on the first increment leaves the
+        # key immortal whenever that single EXPIRE is lost (plan S7).
+        await self._queue_redis.expire(key, MONTHLY_KEY_TTL_SECONDS)
         return used_pages
 
     async def _budget_state(self, context: TaskContext) -> BudgetState:
@@ -132,7 +137,7 @@ class PhotoOcrProcessor:
         return budget_state(spent, daily_budget_rub(context.plan))
 
 
-def _ocr_photo(content: bytes) -> str:
+def _ocr_photo(content: bytes, limits: ProfileLimits) -> str:
     """Run Tesseract on image bytes, honoring the local development override."""
 
     tesseract_cmd = os.getenv("TESSERACT_CMD", "").strip()
@@ -140,9 +145,15 @@ def _ocr_photo(content: bytes) -> str:
         pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
     try:
         with Image.open(BytesIO(content)) as image:
-            return str(pytesseract.image_to_string(image, lang="rus+eng"))
+            # A phone photo is the largest single allocation on this path, so it
+            # is scaled down before tesseract ever sees it (plan section 2).
+            return str(pytesseract.image_to_string(downscaled(image, limits), lang="rus+eng"))
     except (pytesseract.TesseractNotFoundError, FileNotFoundError) as exc:
         raise _OcrUnavailableError from exc
+
+
+def _photo_too_large_text(max_bytes: int) -> str:
+    return PHOTO_TOO_LARGE_TEMPLATE.format(megabytes=max_bytes // (1024 * 1024))
 
 
 class _OcrUnavailableError(Exception):

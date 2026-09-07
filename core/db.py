@@ -1,4 +1,4 @@
-"""Async PostgreSQL access helpers for PgBouncer transaction pooling."""
+"""Async PostgreSQL access helpers, used with or without PgBouncer in front."""
 
 from __future__ import annotations
 
@@ -11,10 +11,11 @@ from uuid import UUID
 import asyncpg
 from asyncpg.pool import PoolConnectionProxy
 
+from core.profile import settings_from_env
+
 DEFAULT_DATABASE_URL = "postgresql://app:dev-local-only@127.0.0.1:6432/assistant"
 DEFAULT_SERVICE_DATABASE_URL = "postgresql://service:dev-local-only@127.0.0.1:6432/assistant"
 DEFAULT_POOL_MIN_SIZE = 1
-DEFAULT_POOL_MAX_SIZE = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +35,9 @@ def database_settings_from_env() -> DatabaseSettings:
         database_url=os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL),
         service_database_url=os.getenv("SERVICE_DATABASE_URL", DEFAULT_SERVICE_DATABASE_URL),
         pool_min_size=int(os.getenv("DATABASE_POOL_MIN_SIZE", str(DEFAULT_POOL_MIN_SIZE))),
-        pool_max_size=int(os.getenv("DATABASE_POOL_MAX_SIZE", str(DEFAULT_POOL_MAX_SIZE))),
+        # The ceiling belongs to the deployment profile: it has to fit the
+        # server's max_connections, which the small profile lowers (plan S6).
+        pool_max_size=settings_from_env().database_pool_max_size,
     )
 
 

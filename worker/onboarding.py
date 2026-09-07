@@ -18,6 +18,7 @@ import uuid_utils
 from core.context import TaskContext
 from core.db import service_transaction
 from core.envelope import UpdateEnvelope
+from core.profile import settings_from_env
 from core.timezones import (
     TIMEZONE_BUTTONS,
     VALID_TIMEZONES,
@@ -95,6 +96,11 @@ RECURRING_REMINDERS_SHIFTED_TEXT = (
 
 TIMEZONE_PENDING_TTL_SECONDS = 604_800
 REJECTED_NOTIFIED_TTL_SECONDS = 86_400
+NOT_ADMITTED_TEXT = (
+    "Этот ассистент работает в закрытом кругу — доступ выдаёт владелец. "
+    "Если он должен быть у вас, попросите его добавить вас в список."
+)
+HINT_TTL_SECONDS = 365 * 86_400
 PROVISIONAL_TIMEZONE = "Europe/Moscow"
 
 # Marks why the timezone prompt was armed: the onboarding path also sends the welcome pair.
@@ -231,6 +237,12 @@ class OnboardingProcessor:
 
         if envelope.kind == "callback":
             await self._answer_callback_first(envelope)
+
+        if not self._admitted(envelope.user_id):
+            # Before anything else, and on every message rather than only at
+            # sign-up: removing an id from the list has to actually close the
+            # door, and a stranger must not create a row (plan S12).
+            return await self._not_admitted_reply_once_per_day(envelope.user_id)
 
         text = _payload_text(envelope)
         if text is not None and envelope.user_id in self._admin_ids:
@@ -371,6 +383,30 @@ class OnboardingProcessor:
                 envelope.chat_id,
                 PROVISIONAL_TIMEZONE,
             )
+
+    def _admitted(self, tg_user_id: int) -> bool:
+        """Whether this id may use the service at all.
+
+        Admins pass unconditionally: the allow list and the admin list are
+        separate settings, and an owner who filled in only one of them would
+        otherwise lock themselves out of their own bot.
+        """
+
+        if tg_user_id in self._admin_ids:
+            return True
+        return settings_from_env().telegram_id_allowed(tg_user_id)
+
+    async def _not_admitted_reply_once_per_day(self, tg_user_id: int) -> str | None:
+        claimed = await self._cache_redis.set(
+            _not_admitted_notified_key(tg_user_id),
+            "1",
+            ex=REJECTED_NOTIFIED_TTL_SECONDS,
+            nx=True,
+        )
+        if not bool(claimed):
+            return None
+        self._logger.info("access refused by allow list: tg_user_id=%s", tg_user_id)
+        return NOT_ADMITTED_TEXT
 
     async def _rejected_reply_once_per_day(self, tg_user_id: int) -> str | None:
         should_reply = await self._cache_redis.set(
@@ -521,6 +557,10 @@ def _tz_pending_key(tg_user_id: int) -> str:
     return f"onboarding:tz_pending:{tg_user_id}"
 
 
+def _not_admitted_notified_key(tg_user_id: int) -> str:
+    return f"onboarding:not_admitted:{tg_user_id}"
+
+
 def _rejected_notified_key(tg_user_id: int) -> str:
     return f"onboarding:rejected_notified:{tg_user_id}"
 
@@ -532,7 +572,13 @@ async def claim_onboarding_hint(
     *,
     logger: logging.Logger | None = None,
 ) -> bool:
-    """Claim a permanent one-time hint slot, failing open on Redis errors."""
+    """Claim a one-time hint slot, failing open on Redis errors.
+
+    The slot expires after a year rather than living forever: on the small
+    profile's single ``noeviction`` instance an immortal key accumulates for
+    every user who ever started the bot (plan S7). A hint that reappears after a
+    year of use is harmless; a key that never goes away is not.
+    """
 
     active_logger = logger if logger is not None else LOGGER
     try:
@@ -540,6 +586,7 @@ async def claim_onboarding_hint(
             await redis.set(
                 f"onboarding:hint:{axis.value}:{tg_user_id}",
                 "1",
+                ex=HINT_TTL_SECONDS,
                 nx=True,
             )
         )
