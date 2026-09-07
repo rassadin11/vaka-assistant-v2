@@ -70,7 +70,7 @@ async def test_load_preserves_per_user_order_with_four_workers(
     )
     try:
         workers = [h.spawn_worker(run_id=run_id, reply_stream=reply_stream) for _ in range(4)]
-        await h.wait_for_workers(workers, timeout=0.5)
+        await h.wait_for_workers(workers, timeout=0.5, redis=queue_redis)
 
         await _post_load_updates(queue_redis, cache_redis, updates)
         replies = await h.wait_for_reply_keys(
@@ -125,14 +125,14 @@ async def test_chaos_kill_reclaims_in_flight_message_exactly_once(
             plain_echo_delay_seconds=5,
         )
         workers = [slow_worker]
-        await h.wait_for_workers(workers, timeout=0.5)
+        await h.wait_for_workers(workers, timeout=0.5, redis=queue_redis)
         await _post_updates(queue_redis, cache_redis, updates)
 
         await h.wait_for_pending(queue_redis, user_id=user_id, timeout=15)
         slow_worker.kill()
         await h.stop_workers([slow_worker], graceful=False)
         workers = [h.spawn_worker(run_id=run_id, reply_stream=reply_stream, fast_reclaim=True)]
-        await h.wait_for_workers(workers, timeout=0.5)
+        await h.wait_for_workers(workers, timeout=0.5, redis=queue_redis)
 
         replies = await h.wait_for_reply_keys(
             queue_redis,
@@ -187,7 +187,7 @@ async def test_poison_message_moves_to_dlq_and_partition_continues(
     )
     try:
         workers = [h.spawn_worker(run_id=run_id, reply_stream=reply_stream, fast_reclaim=True)]
-        await h.wait_for_workers(workers, timeout=0.5)
+        await h.wait_for_workers(workers, timeout=0.5, redis=queue_redis)
         await _post_updates(queue_redis, cache_redis, [poison])
 
         poison_result = await h.wait_for_count(
@@ -254,7 +254,7 @@ async def test_rolling_restart_while_enqueuing_loses_no_messages(
             h.spawn_worker(run_id=run_id, reply_stream=reply_stream, fast_reclaim=True)
             for _ in range(4)
         ]
-        await h.wait_for_workers(workers, timeout=0.5)
+        await h.wait_for_workers(workers, timeout=0.5, redis=queue_redis)
 
         async def produce() -> None:
             nonlocal sent_count
@@ -271,7 +271,7 @@ async def test_rolling_restart_while_enqueuing_loses_no_messages(
             h.spawn_worker(run_id=run_id, reply_stream=reply_stream, fast_reclaim=True)
             for _ in range(4)
         ]
-        await h.wait_for_workers(workers, timeout=0.5)
+        await h.wait_for_workers(workers, timeout=0.5, redis=queue_redis)
         await producer
 
         replies = await h.wait_for_reply_keys(

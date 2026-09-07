@@ -27,6 +27,7 @@ from core.queue import (
     QueueName,
     partition_for_user,
     stream_key,
+    stream_keys,
 )
 from core.rate_limit import rate_limit_key
 
@@ -54,6 +55,7 @@ class Reply:
 class WorkerHandle:
     process: subprocess.Popen[str]
     consumer_name: str
+    log_path: Path | None = None
 
     def kill(self) -> None:
         if self.process.poll() is None:
@@ -187,26 +189,117 @@ def spawn_worker(
     if plain_echo_delay_seconds is not None:
         env["WORKER_PLAIN_ECHO_DELAY_SECONDS"] = str(plain_echo_delay_seconds)
 
-    process = subprocess.Popen(
-        [sys.executable, "-m", "worker"],
-        cwd=REPO_ROOT,
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
-    return WorkerHandle(process=process, consumer_name=consumer_name)
+    log_path = _worker_log_path(consumer_name)
+    if log_path is None:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "worker"],
+            cwd=REPO_ROOT,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    else:
+        env.setdefault("LOG_FORMAT", "text")
+        with log_path.open("w", encoding="utf-8") as log_file:
+            process = subprocess.Popen(
+                [sys.executable, "-m", "worker"],
+                cwd=REPO_ROOT,
+                env=env,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+    return WorkerHandle(process=process, consumer_name=consumer_name, log_path=log_path)
 
 
-async def wait_for_workers(handles: Iterable[WorkerHandle], *, timeout: float = 3.0) -> None:
-    deadline = time.monotonic() + timeout
+def _worker_log_path(consumer_name: str) -> Path | None:
+    """Where this worker writes its log, or ``None`` for the silent default.
+
+    Contour workers run as subprocesses, so a startup failure or a stuck read
+    loop is invisible once their output goes to ``DEVNULL`` -- the test then
+    reports only a timeout. Setting ``CONTOUR_WORKER_LOG_DIR`` keeps the output
+    on disk for exactly those investigations; the default stays silent so normal
+    runs do not litter the tree.
+    """
+
+    directory = os.getenv("CONTOUR_WORKER_LOG_DIR")
+    if not directory:
+        return None
+    path = Path(directory)
+    path.mkdir(parents=True, exist_ok=True)
+    return path / f"{consumer_name}.log"
+
+
+async def wait_for_workers(
+    handles: Iterable[WorkerHandle],
+    *,
+    timeout: float = 3.0,
+    redis: Redis | None = None,
+    ready_timeout: float = 120.0,
+    queue: QueueName = "interactive",
+) -> None:
+    """Wait for workers to survive startup and, given ``redis``, to be reading.
+
+    Surviving ``timeout`` seconds only proves the process has not crashed. It
+    does not prove the worker reached its read loop: importing ``worker`` pulls
+    in ``aiogram`` and ``openai``, which costs upwards of twenty seconds on a
+    cold Windows filesystem. Tests that post messages right after the spawn were
+    racing that import and failing with unrelated timeouts. Passing ``redis``
+    waits for the real signal -- the consumer registered in the group, which
+    Redis records on the first ``XREADGROUP``.
+    """
+
     worker_list = list(handles)
+    await _assert_workers_alive_for(worker_list, timeout)
+    if redis is None:
+        return
+    await _wait_for_consumers(redis, worker_list, queue=queue, timeout=ready_timeout)
+
+
+async def _assert_workers_alive_for(handles: list[WorkerHandle], timeout: float) -> None:
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        exited = [handle for handle in worker_list if handle.process.poll() is not None]
-        if exited:
-            codes = [handle.process.returncode for handle in exited]
-            raise AssertionError(f"worker subprocess exited early: {codes}")
+        _assert_no_worker_exited(handles)
         await asyncio.sleep(0.05)
+
+
+def _assert_no_worker_exited(handles: list[WorkerHandle]) -> None:
+    exited = [handle for handle in handles if handle.process.poll() is not None]
+    if exited:
+        codes = [handle.process.returncode for handle in exited]
+        raise AssertionError(f"worker subprocess exited early: {codes}")
+
+
+async def _wait_for_consumers(
+    redis: Redis,
+    handles: list[WorkerHandle],
+    *,
+    queue: QueueName,
+    timeout: float,
+) -> None:
+    pending = {handle.consumer_name for handle in handles}
+    group = CONSUMER_GROUPS[queue]
+    keys = stream_keys(queue)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        _assert_no_worker_exited(handles)
+        pending -= await _registered_consumers(redis, keys, group)
+        if not pending:
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"workers never joined {group}: {sorted(pending)}")
+
+
+async def _registered_consumers(redis: Redis, keys: list[str], group: str) -> set[str]:
+    names: set[str] = set()
+    for key in keys:
+        try:
+            consumers = await redis.xinfo_consumers(key, group)
+        except ResponseError:
+            continue
+        names.update(str(consumer["name"]) for consumer in consumers)
+    return names
 
 
 async def stop_workers(handles: Iterable[WorkerHandle], *, graceful: bool) -> None:
