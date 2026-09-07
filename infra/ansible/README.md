@@ -1,8 +1,12 @@
 # Ansible provisioning
 
-This directory contains the production provisioning code. The `base` role (server
-hardening + `deploy` user) is implemented and accepted (1.10.2); the `docker` and
-`app` roles are still no-op stubs until tasks 1.10.3 and 1.10.4.
+This directory contains the production provisioning code. All three roles are
+implemented and used in production (31.76.15.130): `base` (server hardening +
+`deploy` user), `docker` (Docker Engine + compose plugin), `app` (app dirs,
+`compose.prod.yml`, Caddy/Prometheus/Grafana configs, systemd unit, webapp).
+Day-to-day operations (deploy, secrets, rollback) live in
+[docs/runbook-deploy.md](../../docs/runbook-deploy.md); infra changes go through
+the `app` role only — never edit files on the server by hand.
 
 ## Setup
 

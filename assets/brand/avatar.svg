@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <title>Vaka — bot avatar (solid dark background, safe for circular crop)</title>
+  <rect width="512" height="512" fill="#28211d"/>
+  <mask id="wave">
+    <rect width="512" height="512" fill="white"/>
+    <rect x="164" y="166" width="24" height="150" rx="12" fill="black"/>
+    <rect x="206" y="191" width="24" height="100" rx="12" fill="black"/>
+    <rect x="248" y="214" width="24" height="54" rx="12" fill="black"/>
+    <rect x="290" y="191" width="24" height="100" rx="12" fill="black"/>
+    <rect x="332" y="166" width="24" height="150" rx="12" fill="black"/>
+  </mask>
+  <g mask="url(#wave)" fill="#c7a287">
+    <circle cx="260" cy="241" r="158"/>
+    <path d="M164 352 C160 382 141 402 116 414 C166 411 203 391 223 367 Z"/>
+  </g>
+  <rect x="248" y="214" width="24" height="54" rx="12" fill="#A7674E"/>
+</svg>

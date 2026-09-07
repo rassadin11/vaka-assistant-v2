@@ -35,7 +35,7 @@ Multi-tenant сервис: один бот, общий пул воркеров, 
 ## Конвенции
 
 - Код, идентификаторы, docstrings — английский; тексты для пользователей и плановые документы — русский.
-- Монорепо: `gateway/`, `worker/`, `core/`, `tools/`, `migrations/`, `infra/` (создаётся в 0.2).
+- Монорепо: `gateway/`, `worker/`, `core/`, `tools/`, `webapp/` (backend Mini App), `miniapp/` (frontend Mini App), `embeddings/`, `migrations/`, `infra/`, `tests/`, `evals/`; обзор — [docs/architecture-overview.md](docs/architecture-overview.md).
 - Контракты между этапами (envelope очереди, ToolDefinition, LLMProvider) — pydantic-модели в `core/`; менять только с правкой плана.
 - Ожидаемые команды после этапа 0–1: `make dev-up` (окружение с нуля), `pytest`, pre-commit (ruff, mypy).
 

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <title>Vaka — favicon (simplified 3-bar mark)</title>
+  <mask id="wave">
+    <rect width="32" height="32" fill="white"/>
+    <rect x="9" y="9" width="4" height="13" rx="2" fill="black"/>
+    <rect x="14" y="13" width="4" height="5" rx="2" fill="black"/>
+    <rect x="19" y="9" width="4" height="13" rx="2" fill="black"/>
+  </mask>
+  <circle cx="16" cy="15.5" r="13" fill="#c7a287" mask="url(#wave)"/>
+  <rect x="14" y="13" width="4" height="5" rx="2" fill="#A7674E"/>
+</svg>

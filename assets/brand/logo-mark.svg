@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <title>Vaka — logo mark (dark theme)</title>
+  <mask id="wave">
+    <rect width="512" height="512" fill="white"/>
+    <rect x="152" y="146" width="28" height="180" rx="14" fill="black"/>
+    <rect x="202" y="176" width="28" height="120" rx="14" fill="black"/>
+    <rect x="252" y="204" width="28" height="64" rx="14" fill="black"/>
+    <rect x="302" y="176" width="28" height="120" rx="14" fill="black"/>
+    <rect x="352" y="146" width="28" height="180" rx="14" fill="black"/>
+  </mask>
+  <g mask="url(#wave)" fill="#c7a287">
+    <circle cx="266" cy="236" r="190"/>
+    <path d="M150 370 C145 405 122 428 92 442 C152 438 196 414 220 386 Z"/>
+  </g>
+  <rect x="252" y="204" width="28" height="64" rx="14" fill="#A7674E"/>
+</svg>
