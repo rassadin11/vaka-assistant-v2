@@ -52,6 +52,21 @@ class WebAppMetrics:
             "Transactions deleted through the Mini App.",
             registry=registry,
         )
+        self.notes_created = Counter(
+            "webapp_notes_created_total",
+            "Notes created through the Mini App.",
+            registry=registry,
+        )
+        self.notes_updated = Counter(
+            "webapp_notes_updated_total",
+            "Notes updated through the Mini App.",
+            registry=registry,
+        )
+        self.notes_deleted = Counter(
+            "webapp_notes_deleted_total",
+            "Notes deleted through the Mini App.",
+            registry=registry,
+        )
         self.ai_summary = Counter(
             "webapp_ai_summary_total",
             "Finance AI summary requests by bounded outcome.",

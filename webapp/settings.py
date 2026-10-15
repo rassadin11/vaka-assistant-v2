@@ -10,7 +10,11 @@ from core.db import DatabaseSettings, database_settings_from_env
 from core.queue import DEFAULT_REDIS_CACHE_URL, DEFAULT_REDIS_QUEUE_URL
 
 DEFAULT_WEBAPP_PORT = 8001
-DEFAULT_MAX_REQUEST_BODY_BYTES = 8_192
+# A note carries up to 8000 characters of user text, and the character limit is
+# enforced in the domain, not here. Cyrillic costs two UTF-8 bytes per character
+# and a client escaping non-ASCII costs six, so a cap sized for the short
+# calendar and finance payloads rejected notes of a perfectly legal length.
+DEFAULT_MAX_REQUEST_BODY_BYTES = 65_536
 
 
 @dataclass(frozen=True, slots=True)

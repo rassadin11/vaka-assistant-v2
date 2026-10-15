@@ -43,6 +43,7 @@ from webapp.errors import WebAppError, error_response
 from webapp.metrics import WebAppMetrics, default_metrics
 from webapp.routers.calendar import install_calendar_routes
 from webapp.routers.finance import install_finance_routes
+from webapp.routers.notes import install_notes_routes
 from webapp.settings import WebAppSettings, settings_from_env
 
 logger = logging.getLogger(__name__)
@@ -267,6 +268,13 @@ def create_app(
         session_secret=app_settings.session_secret,
         metrics=app_metrics,
         clock=app_clock,
+    )
+    install_notes_routes(
+        app,
+        pool=lambda: _pool(runtime_pool),
+        cache=lambda: _cache(runtime_cache_redis),
+        session_secret=app_settings.session_secret,
+        metrics=app_metrics,
     )
 
     _install_spa_routes(app)

@@ -1,12 +1,8 @@
 """Topic notes: explicit, user-owned documents addressed by their title."""
 
-# ruff: noqa: RUF001
-
 from __future__ import annotations
 
-import re
-from datetime import datetime
-from typing import Any, Protocol, cast
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import asyncpg
@@ -14,56 +10,31 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from core.context import TaskContext
 from core.db import user_transaction
-from core.profile import profile_limits
+from core.notes_service import (
+    CONTENT_TOO_LONG_ERROR,
+    LIST_NOTES_LIMIT,
+    MAX_APPEND_TEXT_LENGTH,
+    MAX_NOTE_CONTENT_LENGTH,
+    NO_NOTES_ERROR,
+    InvalidNoteTitle,
+    NoteContentTooLong,
+    NoteOverflow,
+    NotesConnection,
+    NotesLimitReached,
+    append_to_note_by_title,
+    delete_note_by_title,
+    list_notes_for_tool,
+    notes_limit,
+    notes_limit_message,
+    overflow_message,
+    resolve_note,
+    sanitize_title,
+    suggest_titles,
+    upsert_note_by_title,
+    validate_content,
+    validate_title,
+)
 from core.tools import RiskLevel, ToolRegistry, ToolResult, ToolSpec
-
-MAX_NOTE_TITLE_LENGTH = 64
-# A context budget, not a storage budget: list_notes spends about 25-30
-# tokens per row, and 300 rows would blow the 6-8k budget for a whole
-# request. Applies in both profiles for that reason (plan S10).
-LIST_NOTES_LIMIT = 50
-MAX_NOTE_CONTENT_LENGTH = 8000
-MAX_APPEND_TEXT_LENGTH = 1000
-SUGGESTED_TITLES_LIMIT = 10
-
-EMPTY_TITLE_ERROR = "Заголовок заметки не может быть пустым."
-TITLE_TOO_LONG_ERROR = f"Заголовок заметки должен быть не длиннее {MAX_NOTE_TITLE_LENGTH} символов."
-CONTENT_TOO_LONG_ERROR = (
-    f"Текст заметки должен быть не длиннее {MAX_NOTE_CONTENT_LENGTH} символов. "
-    "Сократите текст или разбейте тему на несколько заметок."
-)
-NOTES_LIMIT_ERROR_TEMPLATE = (
-    "Достигнут лимит {limit} заметок. Предложите пользователю ревизию: "
-    "показать список заметок (list_notes) и удалить или объединить неактуальные — "
-    "сам или поручив вам."
-)
-NO_NOTES_ERROR = "У пользователя пока нет заметок."
-
-
-class NotesConnection(Protocol):
-    """Subset of asyncpg used by the note tools."""
-
-    async def fetchval(self, query: str, *args: Any) -> Any: ...
-
-    async def fetchrow(self, query: str, *args: Any) -> Any: ...
-
-    async def fetch(self, query: str, *args: Any) -> list[Any]: ...
-
-    async def execute(self, query: str, *args: Any) -> str: ...
-
-
-_RESOLVE_EXACT_SQL = """
-    SELECT title, content, updated_at
-    FROM notes
-    WHERE title = $1
-"""
-_RESOLVE_CASE_INSENSITIVE_SQL = """
-    SELECT title, content, updated_at
-    FROM notes
-    WHERE lower(btrim(title)) = lower($1)
-    ORDER BY updated_at DESC, title
-    LIMIT 1
-"""
 
 
 class UpsertNoteArgs(BaseModel):
@@ -186,39 +157,22 @@ async def _upsert_note(
     ctx: TaskContext,
     args: UpsertNoteArgs,
 ) -> ToolResult:
-    title = _sanitize_title(args.title)
-    title_error = _validate_title(title)
-    if title_error is not None:
-        return title_error
-
+    title = sanitize_title(args.title)
     content = args.content.strip()
-    if len(content) > MAX_NOTE_CONTENT_LENGTH:
-        return ToolResult(status="error", error=CONTENT_TOO_LONG_ERROR, retryable=True)
-
-    async with user_transaction(pool, ctx.user_id) as connection:
-        existing = await connection.fetchrow(_RESOLVE_EXACT_SQL, title)
-        created = existing is None
-        if created and await _count_notes(connection) >= profile_limits().notes_per_user:
-            return ToolResult(status="error", error=_notes_limit_error(), retryable=False)
-        await connection.execute(
-            """
-            INSERT INTO notes (user_id, title, content, created_at, updated_at)
-            VALUES ($1, $2, $3, now(), now())
-            ON CONFLICT (user_id, title)
-            DO UPDATE SET content = EXCLUDED.content, updated_at = now()
-            """,
-            ctx.user_id,
-            title,
-            content,
-        )
-        notes_count = await _count_notes(connection)
+    try:
+        validate_title(title)
+        validate_content(content)
+        async with user_transaction(pool, ctx.user_id) as connection:
+            outcome = await upsert_note_by_title(connection, ctx.user_id, title, content)
+    except (InvalidNoteTitle, NoteContentTooLong, NotesLimitReached) as exc:
+        return _error_result(exc)
 
     return ToolResult(
         status="ok",
         payload={
-            "created": created,
-            "notes_count": notes_count,
-            "notes_limit": profile_limits().notes_per_user,
+            "created": outcome.created,
+            "notes_count": outcome.notes_count,
+            "notes_limit": notes_limit(),
         },
     )
 
@@ -228,10 +182,11 @@ async def _append_to_note(
     ctx: TaskContext,
     args: AppendToNoteArgs,
 ) -> ToolResult:
-    title = _sanitize_title(args.title)
-    title_error = _validate_title(title)
-    if title_error is not None:
-        return title_error
+    title = sanitize_title(args.title)
+    try:
+        validate_title(title)
+    except InvalidNoteTitle as exc:
+        return _error_result(exc)
 
     text = args.text.strip()
     if not text:
@@ -241,57 +196,41 @@ async def _append_to_note(
             retryable=True,
         )
 
-    async with user_transaction(pool, ctx.user_id) as connection:
-        existing = await _resolve_note(connection, title)
-        created = existing is None
-        if created:
-            if await _count_notes(connection) >= profile_limits().notes_per_user:
-                return ToolResult(status="error", error=_notes_limit_error(), retryable=False)
-            note_content = text
-            if len(note_content) > MAX_NOTE_CONTENT_LENGTH:
-                return ToolResult(status="error", error=CONTENT_TOO_LONG_ERROR, retryable=True)
-            await connection.execute(
-                """
-                INSERT INTO notes (user_id, title, content, created_at, updated_at)
-                VALUES ($1, $2, $3, now(), now())
-                """,
-                ctx.user_id,
-                title,
-                note_content,
-            )
-            stored_title = title
-        else:
-            stored_title = _as_str(existing["title"])
-            current = _as_str(existing["content"])
-            note_content = f"{current}\n{text}" if current else text
-            if len(note_content) > MAX_NOTE_CONTENT_LENGTH:
-                return ToolResult(
-                    status="error",
-                    error=_overflow_error(stored_title, len(note_content)),
-                    retryable=False,
-                )
-            await connection.execute(
-                "UPDATE notes SET content = $2, updated_at = now() WHERE title = $1",
-                stored_title,
-                note_content,
-            )
-        notes_count = await _count_notes(connection)
+    try:
+        async with user_transaction(pool, ctx.user_id) as connection:
+            outcome = await append_to_note_by_title(connection, ctx.user_id, title, text)
+    except (NotesLimitReached, NoteContentTooLong, NoteOverflow) as exc:
+        return _error_result(exc)
 
     return ToolResult(
         status="ok",
         payload={
-            "title": stored_title,
-            "created": created,
-            "note_chars": len(note_content),
+            "title": outcome.title,
+            "created": outcome.created,
+            "note_chars": outcome.note_chars,
             "note_chars_limit": MAX_NOTE_CONTENT_LENGTH,
-            "notes_count": notes_count,
-            "notes_limit": profile_limits().notes_per_user,
+            "notes_count": outcome.notes_count,
+            "notes_limit": notes_limit(),
         },
     )
 
 
-def _notes_limit_error() -> str:
-    return NOTES_LIMIT_ERROR_TEMPLATE.format(limit=profile_limits().notes_per_user)
+def _error_result(exc: Exception) -> ToolResult:
+    """Map a note domain failure to the model-facing error text of the tools."""
+
+    if isinstance(exc, InvalidNoteTitle):
+        return ToolResult(status="error", error=exc.message, retryable=True)
+    if isinstance(exc, NoteContentTooLong):
+        return ToolResult(status="error", error=CONTENT_TOO_LONG_ERROR, retryable=True)
+    if isinstance(exc, NotesLimitReached):
+        return ToolResult(status="error", error=notes_limit_message(exc.limit), retryable=False)
+    if isinstance(exc, NoteOverflow):
+        return ToolResult(
+            status="error",
+            error=overflow_message(exc.title, exc.chars),
+            retryable=False,
+        )
+    raise exc
 
 
 async def _list_notes(pool: asyncpg.Pool, ctx: TaskContext) -> ToolResult:
@@ -299,23 +238,14 @@ async def _list_notes(pool: asyncpg.Pool, ctx: TaskContext) -> ToolResult:
 
     timezone = ZoneInfo(ctx.timezone)
     async with user_transaction(pool, ctx.user_id) as connection:
-        rows = await connection.fetch(
-            """
-            SELECT title, updated_at, length(content) AS chars
-            FROM notes
-            ORDER BY updated_at DESC, title
-            LIMIT $1
-            """,
-            LIST_NOTES_LIMIT,
-        )
-        total = int(cast(int, await connection.fetchval("SELECT count(*) FROM notes")))
+        page = await list_notes_for_tool(connection, LIST_NOTES_LIMIT)
     notes = [
         {
-            "title": _as_str(row["title"]),
-            "updated_at": _as_datetime(row["updated_at"]).astimezone(timezone).isoformat(),
-            "chars": int(cast(int, row["chars"])),
+            "title": item.title,
+            "updated_at": item.updated_at.astimezone(timezone).isoformat(),
+            "chars": item.chars,
         }
-        for row in rows
+        for item in page.items
     ]
     return ToolResult(
         status="ok",
@@ -325,8 +255,8 @@ async def _list_notes(pool: asyncpg.Pool, ctx: TaskContext) -> ToolResult:
             # exist, so the model knows when it is looking at a truncated view
             # and can reach for read_note (prompt rule 16h).
             "notes_count": len(notes),
-            "notes_total": total,
-            "notes_limit": profile_limits().notes_per_user,
+            "notes_total": page.total,
+            "notes_limit": notes_limit(),
         },
     )
 
@@ -336,24 +266,24 @@ async def _read_note(
     ctx: TaskContext,
     args: ReadNoteArgs,
 ) -> ToolResult:
-    title = _sanitize_title(args.title)
-    title_error = _validate_title(title)
-    if title_error is not None:
-        return title_error
+    title = sanitize_title(args.title)
+    try:
+        validate_title(title)
+    except InvalidNoteTitle as exc:
+        return _error_result(exc)
 
     timezone = ZoneInfo(ctx.timezone)
     async with user_transaction(pool, ctx.user_id) as connection:
-        note = await _resolve_note(connection, title)
+        note = await resolve_note(connection, title)
         if note is None:
             return await _not_found(connection, title)
-        content = _as_str(note["content"])
         return ToolResult(
             status="ok",
             payload={
-                "title": _as_str(note["title"]),
-                "content": content,
-                "chars": len(content),
-                "updated_at": _as_datetime(note["updated_at"]).astimezone(timezone).isoformat(),
+                "title": note.title,
+                "content": note.content,
+                "chars": len(note.content),
+                "updated_at": note.updated_at.astimezone(timezone).isoformat(),
             },
         )
 
@@ -363,40 +293,21 @@ async def _delete_note(
     ctx: TaskContext,
     args: DeleteNoteArgs,
 ) -> ToolResult:
-    title = _sanitize_title(args.title)
-    title_error = _validate_title(title)
-    if title_error is not None:
-        return title_error
+    title = sanitize_title(args.title)
+    try:
+        validate_title(title)
+    except InvalidNoteTitle as exc:
+        return _error_result(exc)
 
     async with user_transaction(pool, ctx.user_id) as connection:
-        note = await _resolve_note(connection, title)
-        if note is None:
+        notes_count = await delete_note_by_title(connection, title)
+        if notes_count is None:
             return await _not_found(connection, title)
-        await connection.execute("DELETE FROM notes WHERE title = $1", _as_str(note["title"]))
-        notes_count = await _count_notes(connection)
     return ToolResult(status="ok", payload={"notes_count": notes_count})
 
 
-async def _resolve_note(connection: NotesConnection, title: str) -> Any:
-    """Resolve a title exactly first, then case-insensitively as the model may recall it."""
-
-    exact = await connection.fetchrow(_RESOLVE_EXACT_SQL, title)
-    if exact is not None:
-        return exact
-    return await connection.fetchrow(_RESOLVE_CASE_INSENSITIVE_SQL, title)
-
-
 async def _not_found(connection: NotesConnection, title: str) -> ToolResult:
-    rows = await connection.fetch(
-        """
-        SELECT title
-        FROM notes
-        ORDER BY updated_at DESC, title
-        LIMIT $1
-        """,
-        SUGGESTED_TITLES_LIMIT,
-    )
-    titles = [_as_str(row["title"]) for row in rows]
+    titles = await suggest_titles(connection)
     if not titles:
         return ToolResult(
             status="error",
@@ -412,38 +323,3 @@ async def _not_found(connection: NotesConnection, title: str) -> ToolResult:
         ),
         retryable=True,
     )
-
-
-async def _count_notes(connection: NotesConnection) -> int:
-    return int(cast(int, await connection.fetchval("SELECT count(*) FROM notes")))
-
-
-def _overflow_error(title: str, chars: int) -> str:
-    return (
-        f'Заметка "{title}" переполнена ({chars}/{MAX_NOTE_CONTENT_LENGTH} символов). '
-        "Предложите пользователю ревизию: сократить её, разбить на части или удалить лишнее."
-    )
-
-
-def _validate_title(title: str) -> ToolResult | None:
-    if not title:
-        return ToolResult(status="error", error=EMPTY_TITLE_ERROR, retryable=True)
-    if len(title) > MAX_NOTE_TITLE_LENGTH:
-        return ToolResult(status="error", error=TITLE_TOO_LONG_ERROR, retryable=True)
-    return None
-
-
-def _sanitize_title(value: str) -> str:
-    return re.sub(r"\s+", " ", value.strip())
-
-
-def _as_str(value: object) -> str:
-    if not isinstance(value, str):
-        raise TypeError("note column is not a string")
-    return value
-
-
-def _as_datetime(value: object) -> datetime:
-    if not isinstance(value, datetime):
-        raise TypeError("note updated_at is not a datetime")
-    return value

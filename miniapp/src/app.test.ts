@@ -10,12 +10,15 @@ describe("Mini App start parameter", () => {
   it("resolves query screen before the Telegram start parameter", () => {
     expect(resolveStartScreen("?screen=finance", undefined)).toBe("finance");
     expect(resolveStartScreen("", "finance")).toBe("finance");
+    expect(resolveStartScreen("?screen=notes", undefined)).toBe("notes");
+    expect(resolveStartScreen("", "notes")).toBe("notes");
     expect(resolveStartScreen("?screen=bogus", undefined)).toBe("calendar");
     expect(resolveStartScreen("?screen=calendar", "finance")).toBe("calendar");
   });
 
   it("allows finance and defaults calendar for all other hints", () => {
     expect(screenFromStartParam("finance")).toBe("finance");
+    expect(screenFromStartParam("notes")).toBe("notes");
     expect(screenFromStartParam("calendar")).toBe("calendar");
     expect(screenFromStartParam("unknown")).toBe("calendar");
     expect(screenFromStartParam(null)).toBe("calendar");

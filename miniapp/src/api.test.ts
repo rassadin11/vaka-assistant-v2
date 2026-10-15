@@ -4,13 +4,18 @@ import {
   ApiError,
   authenticate,
   cancelScheduled,
+  createNote,
   createReminder,
+  deleteNote,
   deleteTransaction,
   fetchCalendar,
   fetchFinanceSummary,
   fetchFinanceAiSummary,
   fetchMe,
-  fetchTransactions
+  fetchNote,
+  fetchNotes,
+  fetchTransactions,
+  updateNote
 } from "./api";
 
 describe("Mini App API adapter", () => {
@@ -119,5 +124,43 @@ describe("Mini App API adapter", () => {
       .rejects.toEqual(new ApiError(503, "finance_unavailable", "Финансы недоступны"));
     await expect(deleteTransaction("token", 7))
       .rejects.toEqual(new ApiError(503, "finance_unavailable", "Финансы недоступны"));
+  });
+  it("maps the notes endpoints and surfaces the stale and title_taken codes", async () => {
+    const note = {
+      id: 12, title: "Пробежки", content: "текст", chars: 5,
+      created_at: "2026-10-01T09:00:00+03:00", updated_at: "2026-10-15T09:12:00+03:00"
+    };
+    const list = {
+      notes: [{ id: 12, title: "Пробежки", chars: 5, updated_at: "2026-10-15T09:12:00+03:00" }],
+      notes_total: 1,
+      notes_limit: 100
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(list), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(note), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(note), { status: 201 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: "stale", message: "изменена" }, ...note }), { status: 409 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: "title_taken", message: "занято" } }), { status: 409 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: "not_found", message: "нет" } }), { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchNotes("token")).resolves.toEqual(list);
+    await expect(fetchNote("token", 12)).resolves.toEqual(note);
+    await expect(createNote("token", "Пробежки", "текст")).resolves.toEqual(note);
+    await expect(updateNote("token", 12, { content: "x", expected_updated_at: note.updated_at }))
+      .rejects.toEqual(new ApiError(409, "stale", "изменена"));
+    await expect(updateNote("token", 12, { title: "Книги" }))
+      .rejects.toEqual(new ApiError(409, "title_taken", "занято"));
+    await expect(deleteNote("token", 12)).resolves.toBeUndefined();
+    await expect(deleteNote("token", 12)).rejects.toEqual(new ApiError(404, "not_found", "нет"));
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/app/api/notes");
+    expect(fetchMock.mock.calls[1][0]).toBe("/app/api/notes/12");
+    expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toEqual({ title: "Пробежки", content: "текст" });
+    expect(fetchMock.mock.calls[3][1]?.method).toBe("PATCH");
+    expect(JSON.parse(String(fetchMock.mock.calls[3][1]?.body))).toEqual({ content: "x", expected_updated_at: note.updated_at });
+    expect(JSON.parse(String(fetchMock.mock.calls[4][1]?.body))).toEqual({ title: "Книги" });
+    expect(fetchMock.mock.calls[5][1]?.method).toBe("DELETE");
   });
 });

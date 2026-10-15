@@ -81,7 +81,7 @@ button:disabled { cursor: default; }
 .eyebrow { margin: 0 0 6px; color: var(--accent); font-size: 0.8rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
 .quiet { margin-top: 8px; }
 .app-tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; padding: 6px 12px calc(6px + env(safe-area-inset-bottom)); background: var(--surface); border-top: 1px solid var(--border); }
-.app-tabs-inner { max-width: 680px; margin: 0 auto; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.app-tabs-inner { max-width: 680px; margin: 0 auto; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .nav-item { display: grid; justify-items: center; align-content: center; gap: 3px; padding: 7px 4px; border: 0; border-radius: 14px; background: transparent; color: var(--muted); line-height: 1.1; }
 .nav-item svg { width: 24px; height: 24px; }
 .nav-item span { font-size: 0.72rem; font-weight: 600; }
@@ -241,6 +241,40 @@ button:disabled { cursor: default; }
 .finance-empty, .finance-state { margin: 0; padding: 18px; border: 1px dashed var(--border); border-radius: 14px; background: var(--surface); color: var(--muted); text-align: center; }
 .finance-state { display: grid; gap: 10px; }
 .finance-state h2, .finance-state p { margin: 0; }
+
+.notes { display: grid; gap: 12px; }
+.notes-toolbar { display: grid; grid-template-columns: 1fr 48px; gap: 8px; }
+.notes-search, .note-editor input, .note-editor textarea { width: 100%; min-height: 44px; padding: 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text); font: inherit; }
+.notes-add { min-height: 44px; border: 0; border-radius: 12px; background: var(--primary); color: var(--surface); font-size: 1.5rem; line-height: 1; }
+.notes-add:disabled { opacity: 0.4; }
+.notes-count { margin: 0; color: var(--muted); font-size: 0.85rem; }
+.notes-count-full { color: var(--warning); }
+.notes-list { margin: 0; padding: 0; display: grid; gap: 8px; list-style: none; }
+.note-row { width: 100%; padding: 12px; display: grid; gap: 4px; text-align: left; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text); }
+.note-row strong { overflow-wrap: anywhere; }
+.note-row span { color: var(--muted); font-size: 0.8rem; }
+.notes-empty, .notes-state { margin: 0; padding: 18px; border: 1px dashed var(--border); border-radius: 14px; background: var(--surface); color: var(--muted); line-height: 1.5; }
+.notes-state { display: grid; gap: 10px; text-align: center; }
+.notes-state h2, .notes-state p { margin: 0; }
+.notes-state button, .notes-back, .note-actions button, .note-conflict-actions button { min-height: 44px; padding: 0 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text); }
+.notes-back { justify-self: start; }
+.note-title, .note-editor-title { margin: 0; overflow-wrap: anywhere; }
+.note-meta { margin: 0; }
+.note-content { padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.note-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.note-actions .note-edit, .note-actions .note-save { border-color: var(--primary); background: var(--primary); color: var(--surface); }
+.note-actions .note-delete { color: var(--danger); }
+.note-actions button:disabled { opacity: 0.5; }
+.notes-error { margin: 0; padding: 12px; border-left: 4px solid var(--danger); border-radius: 0 10px 10px 0; background: var(--surface); color: var(--danger); }
+.note-conflict { padding: 12px; display: grid; gap: 10px; border-left: 4px solid var(--warning); border-radius: 0 10px 10px 0; background: var(--surface); }
+.note-conflict p { margin: 0; font-weight: 600; }
+.note-conflict-actions { display: grid; gap: 8px; }
+.note-conflict-force { color: var(--danger); }
+.note-editor label { display: grid; gap: 6px; color: var(--muted); font-size: 0.85rem; }
+.note-editor textarea { min-height: 40dvh; resize: vertical; white-space: pre-wrap; line-height: 1.5; }
+.counter { justify-self: end; color: var(--muted); }
+.counter-over { color: var(--danger); font-weight: 700; }
+.skeleton-search { height: 44px; }
 
 @media (max-width: 380px) {
   .status, .shell { padding-left: 12px; padding-right: 12px; }

@@ -3,6 +3,7 @@ import { useEffect, useState } from "preact/hooks";
 import { ApiError, authenticate, fetchMe, type Me } from "./api";
 import { CalendarScreen } from "./calendar";
 import { FinanceScreen } from "./finance";
+import { NotesScreen } from "./notes";
 import { applyTelegramTheme, telegramWebApp } from "./telegram";
 
 type AppState =
@@ -97,18 +98,20 @@ function Shell({
   token: string;
   refreshSession: () => Promise<string>;
 }) {
-  const [screen, setScreen] = useState<"calendar" | "finance">(() => startScreen());
+  const [screen, setScreen] = useState<MiniAppScreen>(() => startScreen());
   return (
     <main class="shell">
       <header>
         <p class="eyebrow">Vaka Assistant</p>
-        <h1>{screen === "calendar" ? "Календарь" : "Финансы"}</h1>
+        <h1>{SCREEN_TITLES[screen]}</h1>
         <p class="quiet">{me.timezone} · {me.plan}</p>
       </header>
       {screen === "calendar" ? (
         <CalendarScreen token={token} timezone={me.timezone} refreshSession={refreshSession} />
-      ) : (
+      ) : screen === "finance" ? (
         <FinanceScreen token={token} timezone={me.timezone} refreshSession={refreshSession} />
+      ) : (
+        <NotesScreen token={token} timezone={me.timezone} refreshSession={refreshSession} />
       )}
       <nav class="app-tabs" aria-label="Разделы Mini App">
         <div class="app-tabs-inner">
@@ -119,6 +122,10 @@ function Shell({
           <button type="button" class="nav-item" aria-current={screen === "finance" ? "page" : undefined} onClick={() => setScreen("finance")}>
             <FinanceTabIcon />
             <span>Финансы</span>
+          </button>
+          <button type="button" class="nav-item" aria-current={screen === "notes" ? "page" : undefined} onClick={() => setScreen("notes")}>
+            <NotesTabIcon />
+            <span>Заметки</span>
           </button>
         </div>
       </nav>
@@ -146,7 +153,26 @@ function FinanceTabIcon() {
   );
 }
 
-export function startScreen(): "calendar" | "finance" {
+function NotesTabIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 3 14 8 19 8" />
+      <line x1="9" y1="13" x2="15" y2="13" />
+      <line x1="9" y1="17" x2="13" y2="17" />
+    </svg>
+  );
+}
+
+export type MiniAppScreen = "calendar" | "finance" | "notes";
+
+const SCREEN_TITLES: Record<MiniAppScreen, string> = {
+  calendar: "Календарь",
+  finance: "Финансы",
+  notes: "Заметки"
+};
+
+export function startScreen(): MiniAppScreen {
   return resolveStartScreen(
     window.location.search,
     telegramWebApp()?.initDataUnsafe?.start_param
@@ -156,11 +182,11 @@ export function startScreen(): "calendar" | "finance" {
 export function resolveStartScreen(
   search: string,
   startParam: string | null | undefined
-): "calendar" | "finance" {
+): MiniAppScreen {
   const fromQuery = new URLSearchParams(search).get("screen");
   return screenFromStartParam(fromQuery ?? startParam);
 }
 
-export function screenFromStartParam(value: string | null | undefined): "calendar" | "finance" {
-  return value === "finance" ? "finance" : "calendar";
+export function screenFromStartParam(value: string | null | undefined): MiniAppScreen {
+  return value === "finance" || value === "notes" ? value : "calendar";
 }

@@ -24,6 +24,22 @@ def test_last_relevant_tool_wins() -> None:
     )
 
 
+def test_note_tool_maps_to_notes_button() -> None:
+    assert mini_app_button_for_tools(("append_to_note",)) == MiniAppButton(
+        "Открыть заметки", "notes"
+    )
+    assert mini_app_button_for_tools(("list_notes",)) == MiniAppButton("Открыть заметки", "notes")
+
+
+def test_notes_take_part_in_the_last_tool_wins_rule() -> None:
+    assert mini_app_button_for_tools(("add_transaction", "upsert_note")) == MiniAppButton(
+        "Открыть заметки", "notes"
+    )
+    assert mini_app_button_for_tools(("read_note", "create_reminder")) == MiniAppButton(
+        "Открыть календарь", "calendar"
+    )
+
+
 def test_irrelevant_and_empty_tools_have_no_button() -> None:
     assert mini_app_button_for_tools(("get_current_time",)) is None
     assert mini_app_button_for_tools(()) is None

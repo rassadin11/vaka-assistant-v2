@@ -75,6 +75,34 @@ export interface FinanceAiSummary {
   cached?: boolean;
 }
 
+export interface NoteListItem {
+  id: number;
+  title: string;
+  chars: number;
+  updated_at: string;
+}
+
+export interface NotesList {
+  notes: NoteListItem[];
+  notes_total: number;
+  notes_limit: number;
+}
+
+export interface Note {
+  id: number;
+  title: string;
+  content: string;
+  chars: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NoteUpdate {
+  title?: string;
+  content?: string;
+  expected_updated_at?: string;
+}
+
 interface ErrorEnvelope {
   error?: {
     code?: string;
@@ -235,6 +263,82 @@ export async function deleteTransaction(token: string, id: number): Promise<void
     // A non-204 response without JSON is still represented as a public API error.
   }
   throw apiError(response.status, asErrorEnvelope(payload));
+}
+
+export async function fetchNotes(token: string): Promise<NotesList> {
+  const response = await fetch("/app/api/notes", { headers: authorization(token) });
+  const payload: unknown = await response.json();
+  if (!response.ok || !isNotesList(payload)) {
+    throw apiError(response.status, asErrorEnvelope(payload));
+  }
+  return payload;
+}
+
+export async function fetchNote(token: string, id: number): Promise<Note> {
+  const response = await fetch(`/app/api/notes/${id}`, { headers: authorization(token) });
+  return parseNote(response);
+}
+
+export async function createNote(token: string, title: string, content: string): Promise<Note> {
+  const response = await fetch("/app/api/notes", {
+    method: "POST",
+    headers: { ...authorization(token), "Content-Type": "application/json" },
+    body: JSON.stringify({ title, content })
+  });
+  return parseNote(response);
+}
+
+export async function updateNote(token: string, id: number, update: NoteUpdate): Promise<Note> {
+  const response = await fetch(`/app/api/notes/${id}`, {
+    method: "PATCH",
+    headers: { ...authorization(token), "Content-Type": "application/json" },
+    body: JSON.stringify(update)
+  });
+  return parseNote(response);
+}
+
+export async function deleteNote(token: string, id: number): Promise<void> {
+  const response = await fetch(`/app/api/notes/${id}`, {
+    method: "DELETE",
+    headers: authorization(token)
+  });
+  if (response.status === 204) return;
+  let payload: unknown = {};
+  try {
+    payload = await response.json();
+  } catch {
+    // A non-204 response without JSON is still represented as a public API error.
+  }
+  throw apiError(response.status, asErrorEnvelope(payload));
+}
+
+async function parseNote(response: Response): Promise<Note> {
+  let payload: unknown = {};
+  try {
+    payload = await response.json();
+  } catch {
+    // Falls through to the unexpected_response error below.
+  }
+  if (!response.ok || !isNote(payload)) {
+    throw apiError(response.status, asErrorEnvelope(payload));
+  }
+  return payload;
+}
+
+function isNoteListItem(value: unknown): value is NoteListItem {
+  return isRecord(value) && Number.isSafeInteger(value.id) && typeof value.title === "string" &&
+    Number.isSafeInteger(value.chars) && isOffsetDateTime(value.updated_at);
+}
+
+function isNotesList(value: unknown): value is NotesList {
+  return isRecord(value) && Array.isArray(value.notes) && value.notes.every(isNoteListItem) &&
+    Number.isSafeInteger(value.notes_total) && Number.isSafeInteger(value.notes_limit);
+}
+
+function isNote(value: unknown): value is Note {
+  return isRecord(value) && Number.isSafeInteger(value.id) && typeof value.title === "string" &&
+    typeof value.content === "string" && Number.isSafeInteger(value.chars) &&
+    isOffsetDateTime(value.created_at) && isOffsetDateTime(value.updated_at);
 }
 
 function authorization(token: string): { Authorization: string } {
