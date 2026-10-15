@@ -86,6 +86,7 @@ async def test_app_user_id_does_not_leak_between_transactions(postgres_roles: No
 
 
 async def test_pool_ceiling_fits_the_small_profile_connection_budget(
+    postgres_roles: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Two of these pools must still leave connections for alembic and psql."""
