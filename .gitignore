@@ -30,3 +30,7 @@ Thumbs.db
 
 # Ansible bootstrap secrets are encrypted locally and must not be committed.
 infra/ansible/group_vars/prod/vault.yml
+
+# Local operator helpers and diagnostic dumps (machine-specific, not part of the service)
+/backup-prod-to-local.ps1
+/diag/
