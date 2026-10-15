@@ -19,6 +19,20 @@
 
 Открытый порт на машине ровно один — SSH.
 
+## 0.1 Текущая установка (на 2026-10-15)
+
+| | |
+|---|---|
+| Сервер | `31.77.203.98` (`2030269.xorek.cloud`), Ubuntu 24.04, 1 vCPU, 2 ГБ RAM + 2 ГБ swap, диск 30 ГБ |
+| Вход | `root` только по ключу: ключ владельца и ключ рабочей среды Claude (`claude-workspace@vaka`). Пароль отключён (`/etc/ssh/sshd_config.d/00-assistant-hardening.conf`) |
+| Код | `/opt/assistant`, ветка `main`, обновление через deploy-ключ `/root/.ssh/github_deploy` (только чтение) |
+| Секреты | `/etc/assistant/small-infra.env`, `small.env`, `backup.env` (600). Пароль шифрования бэкапов — в `backup.env`, копию хранить вне сервера |
+| Бот | @vAssistantv2testbot, polling; модель `deepseek/deepseek-v4-flash`, провайдеры `novita,parasail` |
+| Бэкапы | cron 03:30 UTC → `/var/backups/assistant`, 14 дней, пока только локально (`BACKUP_ALLOW_LOCAL_ONLY=1`) |
+| Исходный дамп прода | `/root/restore/` (дамп от 2026-10-14 и журнал переноса) |
+
+**SSH с машины владельца при включённом VPN.** Через VPN-туннель SSH зависает на обмене приветствиями. Обход — маршрут к IP сервера мимо туннеля через шлюз Wi‑Fi, от администратора: `route add 31.77.203.98 mask 255.255.255.255 <шлюз Wi‑Fi>` (действует до перезагрузки; шлюз — `Get-NetIPConfiguration`). Постоянный вариант — исключение для IP в настройках VPN-клиента.
+
 ## 1. Развёртывание с нуля
 
 ### 1.1 Подготовка хоста
