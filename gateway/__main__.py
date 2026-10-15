@@ -7,8 +7,9 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import uvicorn
 from aiogram import Bot, Dispatcher
@@ -66,13 +67,12 @@ async def _run_polling() -> None:
 
     bot = Bot(token)
     sender = TelegramSender(bot, admin_chat_ids=config.admin_ids)
-    dispatcher = Dispatcher()
     queue_redis = Redis.from_url(config.redis.queue_url, decode_responses=True)
     cache_redis = Redis.from_url(config.redis.cache_url, decode_responses=True)
 
-    async def on_update(update: Update) -> None:
+    async def on_update(update_dict: dict[str, Any]) -> None:
         await handle_update(
-            update.model_dump(mode="json", exclude_none=True),
+            update_dict,
             queue_redis=queue_redis,
             cache_redis=cache_redis,
             send_user_message=sender.send_message,
@@ -80,7 +80,7 @@ async def _run_polling() -> None:
             rate_limit_burst=config.rate_limit_burst,
         )
 
-    dispatcher.update.register(on_update)
+    dispatcher = build_polling_dispatcher(on_update)
     heartbeat = asyncio.create_task(_publish_polling_heartbeat(bot, cache_redis))
     try:
         # pre_checkout_query will be added here when payments are implemented.
@@ -92,6 +92,32 @@ async def _run_polling() -> None:
         await queue_redis.aclose()
         await cache_redis.aclose()
         await bot.session.close()
+
+
+def build_polling_dispatcher(
+    on_update: Callable[[dict[str, Any]], Awaitable[None]],
+) -> Dispatcher:
+    """Route every allowed update type into the shared webhook/polling path.
+
+    ``Dispatcher`` registers its own router-propagation handler on the raw
+    ``update`` observer in its constructor, so a handler added there after it is
+    never reached: every update ends as "not handled" and is silently dropped.
+    The handler is therefore attached to the event observer of each allowed
+    update type, and aiogram injects the full ``Update`` as ``event_update``.
+
+    The update is handed on in Bot API shape, as the webhook receives it:
+    ``by_alias`` keeps ``from`` instead of aiogram's ``from_user`` field name,
+    without which every message looks sender-less and is ignored.
+    """
+
+    dispatcher = Dispatcher()
+
+    async def forward(_event: object, event_update: Update) -> None:
+        await on_update(event_update.model_dump(mode="json", exclude_none=True, by_alias=True))
+
+    for update_type in ALLOWED_UPDATES:
+        dispatcher.observers[update_type].register(forward)
+    return dispatcher
 
 
 async def _publish_polling_heartbeat(bot: Bot, redis: Redis) -> None:

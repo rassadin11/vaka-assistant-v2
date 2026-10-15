@@ -148,3 +148,54 @@ async def test_heartbeat_survives_a_failing_telegram_call() -> None:
 
     assert redis.writes == []
     assert bot.calls == 1
+
+
+async def test_polling_dispatcher_forwards_every_allowed_update_type() -> None:
+    """Polling must deliver every allowed update to the shared path, intact.
+
+    Regression for the first live run of the small profile: a handler on the raw
+    update observer was shadowed by aiogram's own one ("not handled"), and once
+    reached, aiogram field names (``from_user``) made every message sender-less.
+    """
+
+    from aiogram import Bot
+    from aiogram.dispatcher.event.bases import UNHANDLED
+    from aiogram.types import Update
+
+    from core.envelope import UpdateEnvelope
+    from gateway.app import ALLOWED_UPDATES, _envelope_from_update
+
+    user = {"id": 5, "is_bot": False, "first_name": "u"}
+    chat = {"id": 5, "type": "private"}
+    message = {"message_id": 1, "date": 0, "chat": chat, "from": user, "text": "hi"}
+    samples = {
+        "message": message,
+        "callback_query": {
+            "id": "c",
+            "from": user,
+            "chat_instance": "i",
+            "message": message,
+            "data": "noop",
+        },
+    }
+    assert set(samples) == set(ALLOWED_UPDATES)
+
+    received: list[dict[str, Any]] = []
+
+    async def on_update(update_dict: dict[str, Any]) -> None:
+        received.append(update_dict)
+
+    dispatcher = cli.build_polling_dispatcher(on_update)
+    bot = Bot("42:TEST")
+    try:
+        for update_id, update_type in enumerate(ALLOWED_UPDATES, start=1):
+            payload = {"update_id": update_id, update_type: samples[update_type]}
+            update = Update.model_validate(payload)
+            assert await dispatcher.feed_update(bot, update) is not UNHANDLED
+    finally:
+        await bot.session.close()
+
+    assert [update["update_id"] for update in received] == list(range(1, len(ALLOWED_UPDATES) + 1))
+    # Bot API shape, not aiogram field names: the shared path must accept it.
+    for update in received:
+        assert isinstance(_envelope_from_update(update), UpdateEnvelope)
