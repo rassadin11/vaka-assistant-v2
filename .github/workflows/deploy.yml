@@ -27,7 +27,6 @@ jobs:
           username: deploy
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           envs: IMAGE_TAG
-          script_stop: true
           script: |
             # Rollback: rerun with the tag from /etc/assistant/deploy.env.prev.
             set -eu

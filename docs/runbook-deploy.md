@@ -24,9 +24,21 @@ GitHub → Actions → **Deploy** → Run workflow → `image_tag` = `latest` и
 Workflow сам: валидирует тег → сохраняет текущий `deploy.env` в `.prev` → пишет новый пин → `docker compose pull` → миграции (`alembic upgrade head` одноразовым контейнером под ролью migrator) → `systemctl restart assistant` → ждёт healthy gateway+caddy до 5 минут.
 Секреты workflow: `DEPLOY_HOST`, `DEPLOY_SSH_KEY` (добавлены владельцем).
 
+**Этот путь на 2026-10-16 ни разу не срабатывал** — все выкладки прода шли ручным путём ниже.
+Прогон 2026-10-15 (`sha-5045061…`) упал на шаге `Deploy application` двумя независимыми причинами:
+`ssh: no key found` (в секрете `DEPLOY_SSH_KEY` нет приватного ключа в разбираемом виде — нужно
+перезаписать его полным содержимым `C:/Users/Artem/.assistant/deploy-ci-key`, со строками
+BEGIN/END) и `dial tcp ***:22: i/o timeout` (раннер GitHub не дошёл до порта 22; UFW пускает 22
+отовсюду и с машины владельца порт открыт, так что проверять надо значение `DEPLOY_HOST` и
+доступность сервера из сетей Azure). Пока это не починено — деплоить ручным путём.
+
 **Откат**: перезапустить Deploy с тегом из `/etc/assistant/deploy.env.prev` (посмотреть: `ssh deploy@31.76.15.130 sudo cat /etc/assistant/deploy.env.prev`). Миграции вперёд-совместимы (expand-contract), откат кода без отката БД.
 
-## Ручной деплой с сервера (если Actions недоступен)
+## Ручной деплой с сервера (рабочий путь)
+
+С машины владельца нужен SSH, а он ходит мимо MantaRay только со статическим маршрутом
+(раздел «Mini App (webapp)» ниже, пункт 0): без маршрута SSH виснет на banner exchange, а
+`Test-NetConnection … -Port 22` при этом лживо отвечает `True` (это fakedns).
 
 ```bash
 ssh deploy@31.76.15.130
