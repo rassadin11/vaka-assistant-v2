@@ -2,7 +2,7 @@
 
 Эксплуатация установки на 2 ГБ для закрытого круга 5–10 человек. План профиля — [plan/small-profile.md](../plan/small-profile.md); прод (16 ГБ, домен, Infisical, Ansible) живёт по другому документу — [docs/runbook-deploy.md](runbook-deploy.md), не путать.
 
-Статус документа: **черновик, написан до появления сервера** (2026-09-07). Всё, что помечено «проверено локально», проверено на dev-машине; всё остальное проверяется при первом развёртывании и правится по факту. Пункт S16 закрывается только после того, как по этому документу кто-то развернул стек с нуля.
+Статус документа: написан до появления сервера (2026-09-07), **выверен по первому развёртыванию 2026-10-15** (Ubuntu 24.04, 1 vCPU, 2 ГБ, сервер `31.77.203.98`). Всё, что помечено «проверено локально», проверено на dev-машине; всё остальное проверяется при первом развёртывании и правится по факту. Пункт S16 закрывается только после того, как по этому документу кто-то развернул стек с нуля.
 
 ## 0. Чем эта установка отличается
 
@@ -24,11 +24,18 @@
 ### 1.1 Подготовка хоста
 
 ```bash
-sudo apt update && sudo apt install -y git docker.io docker-compose-plugin
+# Ubuntu 24.04: compose и buildx из репозитория Ubuntu называются так (docker-compose-plugin — пакет репозитория Docker)
+sudo apt update && sudo apt install -y git docker.io docker-compose-v2 docker-buildx
 sudo mkdir -p /opt/assistant && sudo chown "$USER" /opt/assistant
-git clone <repo> /opt/assistant && cd /opt/assistant
-sudo infra/small/prepare-host.sh
+git clone git@github.com:rassadin11/vaka-assistant-v2.git /opt/assistant && cd /opt/assistant
+sudo bash infra/small/prepare-host.sh
 ```
+
+Доступ сервера к репозиторию — deploy-ключ только на чтение (`ssh-keygen -t ed25519 -f /root/.ssh/github_deploy`, публичная часть в GitHub → Settings → Deploy keys, `Host github.com` + `IdentityFile` в `/root/.ssh/config`).
+
+Скрипты `infra/small/*.sh` лежат в репозитории без бита исполнения, поэтому здесь и ниже они вызываются через `bash`.
+
+Если хостер уже завёл свой `/swapfile` (на этом VPS был 512 МБ), скрипт его не трогает и swap останется маленьким: перед запуском выключить и удалить его (`swapoff /swapfile && rm /swapfile` и строку из `/etc/fstab`).
 
 `prepare-host.sh` делает swap 2 ГБ, `vm.swappiness=10`, `vm.overcommit_memory=1` и еженедельный `docker system prune` таймером systemd. Скрипт идемпотентен: после перезагрузки его можно запустить снова и убедиться, что он ничего не меняет — это и есть проверка «настройки пережили ребут».
 
@@ -65,7 +72,11 @@ DATABASE_URL=postgresql://app:<APP_DB_PASSWORD>@postgres:5432/assistant
 SERVICE_DATABASE_URL=postgresql://service:<SERVICE_DB_PASSWORD>@postgres:5432/assistant
 ADMIN_TELEGRAM_IDS=<id владельца>
 ALLOWED_TELEGRAM_IDS=<id через запятую>
+OPENROUTER_MODEL=deepseek/deepseek-v4-flash
+OPENROUTER_ALLOWED_PROVIDERS=novita,parasail
 ```
+
+`OPENROUTER_MODEL` и `OPENROUTER_ALLOWED_PROVIDERS` обязательны: на проде они жили в Infisical, а без них код берёт дефолт `deepseek/deepseek-chat` и промпт `v1`. Модель и промпт связаны (`core/prompt.MODEL_PROMPT_VERSIONS`): смена модели только через eval-набор, см. мастер-план.
 
 `ALLOWED_TELEGRAM_IDS` — шлагбаум профиля: пользователь не из списка получает отказ и в БД не создаётся. Пустое значение выключает whitelist целиком — на этой установке так делать нельзя.
 
@@ -75,9 +86,13 @@ ALLOWED_TELEGRAM_IDS=<id через запятую>
 
 ```bash
 cd /opt/assistant
-docker compose -f infra/compose.small.yml --env-file /etc/assistant/small-infra.env up -d --build
+C="docker compose -f infra/compose.small.yml --env-file /etc/assistant/small-infra.env"
+$C build worker          # один раз: gateway, worker и migrate делят один образ
+$C up -d --no-build
 docker ps --format '{{.Names}}\t{{.Status}}'
 ```
+
+**Не `up -d --build`.** Три сервиса с одним тегом образа собираются параллельно, и все, кроме первого, падают с `image ... already exists` (проверено 2026-10-15, Docker 29 / Compose 2.40). Пока compose не исправлен — собирать один сервис и поднимать с `--no-build`.
 
 Порядок задан самим compose: postgres → миграции одноразовым контейнером → gateway и worker. Первая сборка образа занимает несколько минут.
 
@@ -86,6 +101,8 @@ docker ps --format '{{.Names}}\t{{.Status}}'
 Ожидаемое состояние: `postgres`, `redis`, `searxng`, `gateway`, `worker` — healthy; `migrate` — `Exited (0)`.
 
 ### 1.4 Перевод бота на эту установку
+
+Решение владельца 2026-10-15: установка small работает на **@vAssistantv2testbot**, а не на боте старого прода.
 
 Пока на токене висит webhook, `getUpdates` отвечает 409 и polling не стартует. Порядок:
 
@@ -104,12 +121,25 @@ docker compose -f infra/compose.small.yml --env-file /etc/assistant/small-infra.
 
 Healthcheck gateway — не «процесс жив», а ключ `gw:polling:heartbeat` в Redis, который обновляется, только пока polling реально может получать апдейты. Если контейнер unhealthy, а логи молчат — почти наверняка на токене снова webhook (проверить: `run --rm gateway python -m gateway delete-webhook`).
 
+### 1.5 Перенос данных со старого прода (S18)
+
+Источник — дамп `pg_dump -Fc`, снятый `backup-prod-to-local.ps1` (в нём, в отличие от дампов `backup.sh`, есть `alembic_version` и данные pg_partman). Порядок, выполненный 2026-10-15:
+
+1. Стек поднят, `migrate` применил миграции к пустой БД `assistant`, gateway и worker ещё не запускались.
+2. Дамп зашифрован тем же способом, что и `backup.sh` (`openssl enc -aes-256-cbc -salt -pbkdf2 -iter 200000`), и восстановлен сначала в учебную БД: `bash infra/small/restore.sh <файл>.enc assistant_restore_drill`.
+3. Сверка: число строк по каждой таблице дампа (`pg_restore --data-only -f -`, подсчёт строк в блоках COPY) против `count(*)` в восстановленной БД. Ожидаемые расхождения: в БД нет пустых разделов прошлых месяцев (`*_p20260301`…`_p20260501`), дубликат в `part_config` — строки остаются от миграций. Ни одной строки данных не потеряно.
+4. Боевое восстановление: `SKIP_MIGRATIONS=1 bash infra/small/restore.sh <файл>.enc assistant`, затем **обязательно** `delete from alembic_version where version_num <> '<текущая голова>'` — иначе в таблице две версии и следующая миграция ломается. Последовательности восстанавливаются самим дампом (`SEQUENCE SET`).
+5. Учебная БД удалена.
+
+Скрипты, читающие команды со stdin (`ssh host 'bash -s' <<EOF`), здесь не годятся: `docker compose exec -T` внутри `restore.sh` съедает остаток скрипта. Копировать скрипт на сервер файлом и запускать с `</dev/null`.
+
 ## 2. Обновление
 
 ```bash
 cd /opt/assistant
 git pull
-docker compose -f infra/compose.small.yml --env-file /etc/assistant/small-infra.env up -d --build
+C="docker compose -f infra/compose.small.yml --env-file /etc/assistant/small-infra.env"
+$C build worker && $C up -d --no-build
 ```
 
 Миграции применяет контейнер `migrate` до старта приложения. Откат: `git checkout <прошлый sha>` и та же команда — миграции обратно совместимы с предыдущей версией кода (expand-contract), поэтому откат кода не требует отката схемы.
@@ -119,7 +149,7 @@ docker compose -f infra/compose.small.yml --env-file /etc/assistant/small-infra.
 Ночной запуск (crontab пользователя, у которого есть доступ к docker):
 
 ```
-30 3 * * * cd /opt/assistant && env $(cat /etc/assistant/backup.env | xargs) infra/small/backup.sh >> /var/log/assistant-backup.log 2>&1
+30 3 * * * cd /opt/assistant && env $(cat /etc/assistant/backup.env | xargs) bash infra/small/backup.sh >> /var/log/assistant-backup.log 2>&1
 ```
 
 `/etc/assistant/backup.env` (`chmod 600`):
@@ -218,8 +248,8 @@ df -h / && docker system df
 
 Заполняется при первом развёртывании:
 
-- [ ] стек поднимается на реальных 2 ГБ и переживает сутки без OOM (S13 — гейт профиля);
-- [ ] `prepare-host.sh` пережил перезагрузку;
-- [ ] gateway в polling с реальным токеном становится healthy, 409 не воспроизводится (S17);
-- [ ] бэкап уезжает на внешнее хранилище и восстанавливается оттуда (S11, серверная часть);
-- [ ] перенос данных с прода (S18).
+- [ ] стек поднимается на реальных 2 ГБ и переживает сутки без OOM (S13 — гейт профиля). Поднимается: 2026-10-15 в покое ~1.1 ГБ занято, gateway 158/192 МБ (82 % лимита — следить), worker ~275/640 МБ; сутки и нагрузочный замер — впереди;
+- [x] `prepare-host.sh` пережил перезагрузку (2026-10-15: swap 2 ГБ, sysctl и таймер на месте, повторный запуск ничего не меняет);
+- [x] gateway в polling с реальным токеном становится healthy, 409 не воспроизводится (S17). **Найдены и исправлены два дефекта polling-пути** (2026-10-15): обработчик на `dispatcher.update` никогда не вызывался (aiogram регистрирует там свой первым) — все апдейты уходили в «not handled»; после этого `model_dump` без `by_alias` отдавал `from_user` вместо `from`, и каждое сообщение отбрасывалось как «без отправителя». Healthcheck при этом был зелёным: heartbeat проверяет связь с Telegram, а не доставку;
+- [ ] бэкап уезжает на внешнее хранилище и восстанавливается оттуда (S11, серверная часть). Ночной `backup.sh` по cron работает, первый дамп снят 2026-10-15; внешнего адресата пока нет — временно `BACKUP_ALLOW_LOCAL_ONLY=1` по решению владельца;
+- [x] перенос данных с прода (S18) — 2026-10-15, см. §1.5: 44 пользователя, 2616 сообщений, все непустые таблицы совпали построчно.
