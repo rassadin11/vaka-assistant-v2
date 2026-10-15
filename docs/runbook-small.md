@@ -101,12 +101,11 @@ OPENROUTER_ALLOWED_PROVIDERS=novita,parasail
 ```bash
 cd /opt/assistant
 C="docker compose -f infra/compose.small.yml --env-file /etc/assistant/small-infra.env"
-$C build worker          # один раз: gateway, worker и migrate делят один образ
-$C up -d --no-build
+$C up -d --build
 docker ps --format '{{.Names}}\t{{.Status}}'
 ```
 
-**Не `up -d --build`.** Три сервиса с одним тегом образа собираются параллельно, и все, кроме первого, падают с `image ... already exists` (проверено 2026-10-15, Docker 29 / Compose 2.40). Пока compose не исправлен — собирать один сервис и поднимать с `--no-build`.
+Сборку несёт только сервис `migrate`: gateway, worker и webapp делят с ним один тег образа, а параллельная сборка одного тега падает с `image ... already exists` (найдено 2026-10-15, Docker 29 / Compose 2.40; compose исправлен).
 
 Порядок задан самим compose: postgres → миграции одноразовым контейнером → gateway и worker. Первая сборка образа занимает несколько минут.
 
@@ -153,7 +152,7 @@ Healthcheck gateway — не «процесс жив», а ключ `gw:polling:
 cd /opt/assistant
 git pull
 C="docker compose -f infra/compose.small.yml --env-file /etc/assistant/small-infra.env"
-$C build worker && $C up -d --no-build
+$C up -d --build
 ```
 
 Миграции применяет контейнер `migrate` до старта приложения. Откат: `git checkout <прошлый sha>` и та же команда — миграции обратно совместимы с предыдущей версией кода (expand-contract), поэтому откат кода не требует отката схемы.

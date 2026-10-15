@@ -116,6 +116,9 @@ services:
     # because there is no deploy pipeline here to do it as a separate step.
     # Runs as the migrator role, the only role allowed to change the schema.
     image: *app-image
+    # Only this service carries `build:`. gateway, worker and webapp share the
+    # same image tag, and building them in parallel makes every build but the
+    # first fail with "image already exists", so `up -d --build` would break.
     build: *app-build
     # $$ keeps the expansion inside the container: the DSN lives in small.env,
     # which compose reads for the container but never interpolates itself.
@@ -131,7 +134,6 @@ services:
   gateway:
     # Polling, not webhook: no domain, no TLS, no inbound port (4.8).
     image: *app-image
-    build: *app-build
     command: ["python", "-m", "gateway", "polling"]
     restart: unless-stopped
     mem_limit: 192m
@@ -165,7 +167,6 @@ services:
     # Single replica by design: ~350 MB idle, ~500 MB at the OCR peak, and the
     # budget in section 2 has room for exactly one.
     image: *app-image
-    build: *app-build
     command: ["python", "-m", "worker"]
     restart: unless-stopped
     mem_limit: 640m
@@ -219,7 +220,6 @@ services:
     # with `--profile miniapp` only after S13 says there is room.
     profiles: ["miniapp"]
     image: *app-image
-    build: *app-build
     command: ["python", "-m", "webapp"]
     restart: unless-stopped
     mem_limit: 192m
