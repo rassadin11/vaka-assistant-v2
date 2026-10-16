@@ -1,0 +1,45 @@
+# TLS entrypoint of the small profile. It exists for one reason: the Mini App
+# needs a public HTTPS origin (Telegram refuses anything else). Everything else
+# the prod Caddyfile proxies -- /webhook/*, /oauth/callback, /tribute/webhook --
+# is deliberately absent here: updates arrive by polling (plan 4.8), and an
+# unlisted route cannot bring the webhook back by accident.
+#
+# MINIAPP_SITE_ADDRESS lets a dev stack serve the same routes over plain HTTP
+# (set it to ":8080"); unset, it is the production host name and Caddy issues a
+# Let's Encrypt certificate over HTTP-01, which is what port 80 is published for.
+
+{
+	email artem.rassadin21@gmail.com
+}
+
+{$MINIAPP_SITE_ADDRESS:vaka-assistant.ru} {
+	log {
+		output stdout
+		format json
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	request_body {
+		max_size 1MB
+	}
+
+	@miniapp path /app /app/*
+	header @miniapp {
+		-X-Frame-Options
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'self'"
+	}
+	handle @miniapp {
+		reverse_proxy webapp:8001
+	}
+
+	handle {
+		respond 404
+	}
+}

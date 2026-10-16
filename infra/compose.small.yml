@@ -3,7 +3,9 @@
 # section 3, task S9 in section 6).
 #
 # Differences from compose.prod.yml, all of them deliberate:
-#   - no Caddy, no domain, no TLS: Telegram is polled, not webhooked (4.8);
+#   - Caddy serves one route, /app/*, so the Mini App has an HTTPS origin
+#     (S19); Telegram is still polled, not webhooked, and no /webhook/*
+#     route exists here (4.8);
 #   - no Infisical: secrets come from one env file on disk, mode 600 (S5);
 #   - no PgBouncer: asyncpg connects to postgres directly (S6);
 #   - no embeddings service: retrieval is Postgres full-text search (4.1);
@@ -30,10 +32,12 @@
 #                       long-running application container.
 #   small.env        -- TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, GROQ_API_KEY,
 #                       DATABASE_URL (app role), SERVICE_DATABASE_URL,
-#                       ADMIN_TELEGRAM_IDS, ALLOWED_TELEGRAM_IDS.
+#                       ADMIN_TELEGRAM_IDS, ALLOWED_TELEGRAM_IDS,
+#                       WEBAPP_SESSION_SECRET (Mini App sessions, S19).
 #
-# Nothing is published to the host: the stack talks to Telegram outbound only,
-# so the single open port on the box stays SSH.
+# Only Caddy publishes ports -- 80 and 443, for the Mini App and for ACME
+# HTTP-01. Everything else talks to Telegram outbound only, so the open ports on
+# the box are SSH, 80 and 443 (S19; until S19 they were SSH alone).
 
 name: personal-assistant-small
 
@@ -215,10 +219,10 @@ services:
       start_period: 30s
 
   webapp:
-    # Mini App is off by default: it needs another ~192 MB plus Caddy and a
-    # domain to be reachable, which leaves ~50 MB of headroom (4.4). Start it
-    # with `--profile miniapp` only after S13 says there is room.
-    profiles: ["miniapp"]
+    # On by default since 2026-10-16 (4.4): the 16 GB prod box is gone, so this
+    # is the only place the Mini App can live. Capped at 192 MB next to Caddy's
+    # 64 MB; the measured headroom was 1219 MB available, and S13 re-measures it
+    # under OCR load with both containers running.
     image: *app-image
     command: ["python", "-m", "webapp"]
     restart: unless-stopped
@@ -243,6 +247,31 @@ services:
       retries: 3
       start_period: 90s
 
+  caddy:
+    # The only container with published ports. 80 is required by ACME HTTP-01
+    # and redirects to 443; the single proxied route is /app/* (S19).
+    image: caddy:2-alpine
+    restart: unless-stopped
+    mem_limit: 64m
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./small/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      webapp:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "caddy", "version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
 volumes:
   postgres_data:
   redis_data:
+  caddy_data:
+  caddy_config:
