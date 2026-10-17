@@ -13,7 +13,7 @@ from evals.scenarios_v1 import build_scenarios
 async def main() -> int:
     """Run all scenarios and return a shell-compatible status code."""
 
-    prompt_version = os.getenv("EVAL_PROMPT_VERSION", "v1")
+    prompt_version = os.getenv("EVAL_PROMPT_VERSION", "v2")
     scenarios = build_scenarios(prompt_version)
     model = os.getenv("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL)
     print(f"Model: {model}; prompt version: {prompt_version}; scenarios: {len(scenarios)}")

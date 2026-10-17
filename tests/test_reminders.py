@@ -399,3 +399,108 @@ def test_agent_task_update_id_is_deterministic() -> None:
     firing = datetime(2026, 7, 11, 9, tzinfo=UTC)
     assert agent_task_update_id(7, firing) == agent_task_update_id(7, firing)
     assert agent_task_update_id(7, firing) != agent_task_update_id(8, firing)
+
+
+async def test_schedule_task_requires_exactly_one_schedule() -> None:
+    pool = FakePool()
+    neither = await _schedule_task(
+        pool,
+        _context(),
+        ScheduleTaskArgs(prompt="prompt", title="title"),
+    )
+    both = await _schedule_task(
+        pool,
+        _context(),
+        ScheduleTaskArgs(
+            prompt="prompt",
+            cron="0 9 * * *",
+            run_at="2026-12-01T08:30",
+            title="title",
+        ),
+    )
+
+    assert neither.status == both.status == "error"
+    assert neither.retryable is both.retryable is False
+    assert pool.connection.tasks == []
+
+
+async def test_schedule_task_stores_one_off_run_in_user_timezone() -> None:
+    pool = FakePool()
+    created = await _schedule_task(
+        pool,
+        _context(),
+        ScheduleTaskArgs(prompt="prompt", run_at="2099-12-01T08:30", title="title"),
+    )
+
+    assert created.status == "ok"
+    assert created.payload["cron"] is None
+    stored = pool.connection.tasks[0]
+    assert stored["kind"] == "agent_task"
+    assert stored["cron_expr"] is None
+    assert stored["next_run_at"] == datetime(2099, 12, 1, 5, 30, tzinfo=UTC)
+
+
+async def test_schedule_task_rejects_past_and_malformed_one_off_times() -> None:
+    pool = FakePool()
+    past = await _schedule_task(
+        pool,
+        _context(),
+        ScheduleTaskArgs(prompt="prompt", run_at="2020-01-01T08:30", title="title"),
+    )
+    malformed = await _schedule_task(
+        pool,
+        _context(),
+        ScheduleTaskArgs(prompt="prompt", run_at="tomorrow morning", title="title"),
+    )
+
+    assert past.status == malformed.status == "error"
+    assert past.retryable is True
+    assert malformed.retryable is False
+    assert pool.connection.tasks == []
+
+
+async def test_active_task_limit_counts_one_off_and_recurring_together() -> None:
+    pool = FakePool()
+    pool.connection.tasks = [
+        _task(index + 1, "agent_task", "0 9 * * *" if index % 2 else None) for index in range(10)
+    ]
+
+    limited = await _schedule_task(
+        pool,
+        _context(),
+        ScheduleTaskArgs(prompt="prompt", run_at="2099-12-01T08:30", title="title"),
+    )
+
+    assert limited.status == "error"
+    assert len(pool.connection.tasks) == 10
+
+
+async def test_list_scheduled_tasks_reports_one_off_without_cron() -> None:
+    pool = FakePool()
+    future = datetime.now(UTC) + timedelta(days=1)
+    pool.connection.tasks = [{**_task(1, "agent_task", None), "next_run_at": future}]
+
+    listed = await _list_scheduled_tasks(pool, _context())
+
+    assert listed.payload["tasks"][0]["cron"] is None
+
+
+async def test_scheduler_finishes_one_off_agent_task_after_a_single_run() -> None:
+    pool = FakePool()
+    pool.connection.tasks = [_task(1, "agent_task", None)]
+    enqueued: list[Any] = []
+
+    async def sender(_chat_id: int, _text: str) -> None:
+        return None
+
+    async def enqueue_background(envelope: object) -> None:
+        enqueued.append(envelope)
+
+    worked = await SchedulerProcessor(
+        pool, send_reply=sender, enqueue_background=enqueue_background
+    ).run_once()
+
+    assert worked is True
+    assert len(enqueued) == 1
+    assert enqueued[0].kind == "agent_task"
+    assert pool.connection.tasks[0]["status"] == "done"

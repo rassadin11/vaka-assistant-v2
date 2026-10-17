@@ -8,6 +8,7 @@ from typing import Any
 
 from core.envelope import UpdateEnvelope
 from core.queue import (
+    AGENT_TASK_FAILURE_TEXT,
     CONSUMER_GROUPS,
     DLQ_MAXLEN,
     DLQ_STREAM,
@@ -610,3 +611,46 @@ def _queue_for_group(groupname: str) -> QueueName:
         if group == groupname:
             return queue
     raise AssertionError(f"unexpected group: {groupname}")
+
+
+def _scheduled_envelope(update_id: int) -> UpdateEnvelope:
+    return _envelope(
+        update_id=update_id,
+        kind="agent_task",
+        payload={"text": "собери сводку", "scheduled_task_id": 3, "title": "Утренний обзор"},
+    )
+
+
+async def test_failed_scheduled_run_is_reported_as_a_background_task() -> None:
+    queue_redis = FakeQueueRedis()
+    cache_redis = FakeCacheRedis()
+    envelope = _scheduled_envelope(460)
+    worker, callbacks = _worker(queue_redis, cache_redis, processor=FailingProcessor())
+
+    queue_redis.read_responses["background"].append(_read_response("background", envelope))
+    assert await worker.run_once()
+
+    assert callbacks.replies == [(42, f"⏰ Утренний обзор: {AGENT_TASK_FAILURE_TEXT}")]
+
+
+async def test_dlq_diversion_of_a_scheduled_run_keeps_the_background_wording() -> None:
+    queue_redis = FakeQueueRedis()
+    cache_redis = FakeCacheRedis()
+    envelope = _scheduled_envelope(461)
+    worker, callbacks = _worker(
+        queue_redis,
+        cache_redis,
+        processor=FailingProcessor(),
+        config=WorkerConfig(
+            max_deliveries=0,
+            reclaim_interval_seconds=999,
+            lock_retry_sleep_seconds=0,
+            lock_wait_timeout_seconds=0,
+            stream_order_wait_timeout_seconds=0,
+        ),
+    )
+    queue_redis.read_responses["background"].append(_read_response("background", envelope))
+
+    assert await worker.run_once()
+
+    assert callbacks.replies == [(42, f"⏰ Утренний обзор: {AGENT_TASK_FAILURE_TEXT}")]

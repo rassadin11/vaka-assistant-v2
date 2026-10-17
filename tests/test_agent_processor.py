@@ -200,11 +200,11 @@ async def test_custom_prompt_version_is_persisted_in_assistant_metadata(
     monkeypatch.setattr("worker.agent_processor.save_usage", _save_usage)
     processor = _processor(
         MockLLMProvider.scripted([mock_text_response("answer")]),
-        prompt_version="v2-flash",
+        prompt_version="v2",
     )
 
     assert await processor.process(_envelope(), _context()) == "answer"
-    assert captured[0][-1].meta == {"prompt_version": "v2-flash", "stop_reason": "answer"}
+    assert captured[0][-1].meta == {"prompt_version": "v2", "stop_reason": "answer"}
 
 
 async def test_voice_transcript_persists_voice_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -305,7 +305,7 @@ async def test_end_of_task_persists_user_tool_round_and_final_answer_once(
     assert drafts[1].tool_calls is not None
     assert drafts[2].content == "tool result"
     assert drafts[3].content == "final answer"
-    assert drafts[3].meta == {"prompt_version": "v1", "stop_reason": "answer"}
+    assert drafts[3].meta == {"prompt_version": "v2", "stop_reason": "answer"}
 
 
 @pytest.mark.parametrize(
@@ -704,7 +704,7 @@ async def test_processor_saves_usage_for_completed_stop_reasons(
     assert saved[0][0] == "interactive"
     assert len(saved[0][1]) == len(responses)
     assert saved_messages[0][-1].meta == {
-        "prompt_version": "v1",
+        "prompt_version": "v2",
         "stop_reason": expected_stop_reason,
     }
 
@@ -763,7 +763,7 @@ async def test_processor_saves_usage_when_agent_times_out(
     await processor.process(_envelope(), _context())
 
     assert len(saved[0]) == 1
-    assert saved_messages[0][-1].meta == {"prompt_version": "v1", "stop_reason": "timeout"}
+    assert saved_messages[0][-1].meta == {"prompt_version": "v2", "stop_reason": "timeout"}
 
 
 async def test_soft_refuse_does_not_call_the_llm() -> None:
@@ -1004,3 +1004,37 @@ async def test_budget_limit_approach_notifies_above_one_hundred_percent(
     await asyncio.sleep(0)
 
     assert sent == [(_context().chat_id, LIMIT_APPROACH_BUDGET_TEXT)]
+
+
+async def test_scheduled_run_is_marked_in_history_and_in_the_system_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved: list[list[MessageDraft]] = []
+
+    async def fake_load(*_args: object) -> DialogHistory:
+        return DialogHistory(summary=None, tail=[])
+
+    async def fake_save(
+        _pool: object,
+        _user_id: UUID,
+        drafts: list[MessageDraft],
+        _trace: UUID,
+    ) -> list[UUID]:
+        saved.append(drafts)
+        return []
+
+    monkeypatch.setattr("worker.agent_processor.load_dialog", fake_load)
+    monkeypatch.setattr("worker.agent_processor.save_messages", fake_save)
+    monkeypatch.setattr("worker.agent_processor.save_usage", _save_usage)
+    provider = MockLLMProvider.scripted(
+        [mock_text_response("scheduled answer"), mock_text_response("interactive answer")]
+    )
+    processor = _processor(provider)
+
+    await processor.process(_agent_task_envelope("собери сводку"), _context())
+    await processor.process(_envelope("сколько я потратил?"), _context())
+
+    assert saved[0][0].meta == {"source": "agent_task", "scheduled_task_id": 1}
+    assert "=== BACKGROUND TASK ===" in (provider.calls[0].messages[0].content or "")
+    assert saved[1][0].meta is None
+    assert "=== BACKGROUND TASK ===" not in (provider.calls[1].messages[0].content or "")

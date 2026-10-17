@@ -166,3 +166,12 @@ def test_lean_context_omits_facts_and_halves_the_tail_budget() -> None:
     assert "=== KNOWN FACTS ABOUT THE USER ===" not in (lean.system_message.content or "")
     assert len(lean.tail) < len(standard.tail)
     assert lean.trimmed
+
+
+def test_background_task_block_is_added_only_for_scheduled_runs() -> None:
+    interactive = build_context(_dynamics()).system_message.content or ""
+    scheduled = build_context(_dynamics(), background_task=True).system_message.content or ""
+
+    assert "=== BACKGROUND TASK ===" not in interactive
+    assert "=== BACKGROUND TASK ===" in scheduled
+    assert "the user wrote nothing" in scheduled

@@ -87,7 +87,11 @@ def to_llm_messages(tail: Sequence[StoredMessage]) -> list[LLMMessage]:
     return [
         LLMMessage(
             role=message.role,
-            content=message.content,
+            content=(
+                "[scheduled task] " + message.content
+                if message.meta.get("source") == "agent_task" and message.content is not None
+                else message.content
+            ),
             tool_calls=message.tool_calls,
             tool_call_id=message.tool_call_id,
         )

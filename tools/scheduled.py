@@ -1,4 +1,4 @@
-"""Recurring agent-task scheduling tools backed by ``scheduled_tasks``."""
+"""Recurring and one-off agent-task scheduling tools backed by ``scheduled_tasks``."""
 
 from __future__ import annotations
 
@@ -28,12 +28,13 @@ PROMPT_LIST_MAX_LENGTH = 200
 
 
 class ScheduleTaskArgs(BaseModel):
-    """Arguments for creating a recurring agent task."""
+    """Arguments for creating a recurring or one-off agent task."""
 
     model_config = ConfigDict(extra="ignore")
 
     prompt: str = Field(min_length=1, max_length=PROMPT_MAX_LENGTH)
-    cron: str = Field(min_length=1, max_length=CRON_MAX_LENGTH)
+    cron: str | None = Field(default=None, min_length=1, max_length=CRON_MAX_LENGTH)
+    run_at: str | None = None
     title: str = Field(min_length=1, max_length=TITLE_MAX_LENGTH)
 
 
@@ -66,7 +67,8 @@ def register_scheduled_task_tools(registry: ToolRegistry, app_pool: asyncpg.Pool
     registry.register(
         ToolSpec(
             "schedule_task",
-            "Schedule a recurring background agent task using a cron expression.",
+            "Schedule a background agent task once at run_at or repeatedly using cron; "
+            "provide exactly one.",
             ScheduleTaskArgs,
             RiskLevel.MUTATING_INTERNAL,
             schedule_task,
@@ -100,18 +102,42 @@ async def _schedule_task(
 ) -> ToolResult:
     timezone = ZoneInfo(ctx.timezone)
     now = datetime.now(UTC).astimezone(timezone)
-    try:
-        first_run_at = _validate_cron(args.cron, now)
-    except (TypeError, ValueError):
+    if (args.cron is None) == (args.run_at is None):
         return ToolResult(
             status="error",
-            error="Некорректное cron-выражение.",
+            error="Укажите ровно одно: cron для повторяющейся задачи или run_at для разовой.",
         )
-    if first_run_at is None:
-        return ToolResult(
-            status="error",
-            error="Расписание не может выполняться чаще одного раза в час.",
-        )
+    if args.cron is not None:
+        try:
+            recurring_run_at = _validate_cron(args.cron, now)
+        except (TypeError, ValueError):
+            return ToolResult(
+                status="error",
+                error="Некорректное cron-выражение.",
+            )
+        if recurring_run_at is None:
+            return ToolResult(
+                status="error",
+                error="Расписание не может выполняться чаще одного раза в час.",
+            )
+        first_run_at = recurring_run_at
+    else:
+        try:
+            first_run_at = _parse_run_at(str(args.run_at), timezone)
+        except (TypeError, ValueError):
+            return ToolResult(
+                status="error",
+                error="Некорректное время запуска: нужен формат ISO 8601.",
+            )
+        if first_run_at <= now:
+            return ToolResult(
+                status="error",
+                error=(
+                    "Время запуска должно быть в будущем. "
+                    f"Сейчас по вашему времени: {now.isoformat()}."
+                ),
+                retryable=True,
+            )
 
     async with user_transaction(pool, ctx.user_id) as connection:
         active_count = await connection.fetchval(
@@ -124,7 +150,10 @@ async def _schedule_task(
         if int(active_count or 0) >= profile_limits().active_scheduled_tasks:
             return ToolResult(
                 status="error",
-                error="Достигнут лимит: одновременно можно иметь не более 10 активных задач.",
+                error=(
+                    "Достигнут лимит: одновременно можно иметь не более "
+                    f"{profile_limits().active_scheduled_tasks} активных задач."
+                ),
             )
         task_id = await connection.fetchval(
             """
@@ -169,7 +198,7 @@ async def _list_scheduled_tasks(pool: asyncpg.Pool, ctx: TaskContext) -> ToolRes
             "id": int(row["id"]),
             "title": str(row["title"]),
             "prompt": str(row["payload"])[:PROMPT_LIST_MAX_LENGTH],
-            "cron": str(row["cron_expr"]),
+            "cron": row["cron_expr"],
             "next_run_at": _as_datetime(row["next_run_at"]).astimezone(timezone).isoformat(),
         }
         for row in rows
@@ -201,6 +230,15 @@ def _validate_cron(cron_expr: str, now: datetime) -> datetime | None:
     ):
         return None
     return firings[0]
+
+
+def _parse_run_at(value: str, timezone: ZoneInfo) -> datetime:
+    """Read a one-off run time, treating a naive value as the user's local time."""
+
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone)
+    return parsed.astimezone(timezone)
 
 
 def _as_datetime(value: object) -> datetime:

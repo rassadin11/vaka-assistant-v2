@@ -28,6 +28,7 @@ from core.queue import (
     QueueMessage,
     QueueName,
     ack,
+    agent_task_failure_notice,
     decode_read_group_response,
     delivery_count,
     ensure_groups,
@@ -339,7 +340,12 @@ class Worker:
                 nx=True,
             )
             if bool(claimed):
-                await self._send_reply(envelope.chat_id, RETRY_NOTICE_TEXT)
+                notice = (
+                    agent_task_failure_notice(envelope)
+                    if envelope.kind == "agent_task"
+                    else RETRY_NOTICE_TEXT
+                )
+                await self._send_reply(envelope.chat_id, notice)
         except Exception:
             self._logger.warning("failed to send retry notice", exc_info=True, extra=log_extra)
 

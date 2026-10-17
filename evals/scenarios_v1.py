@@ -7,6 +7,10 @@ import json
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from itertools import pairwise
+
+from croniter import croniter
 
 from core.context_manager import UserDynamics, build_context
 from core.llm import LLMMessage, LLMResponse, LLMToolCall, ToolDefinition
@@ -106,6 +110,32 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
             },
             ["text", "remind_at"],
         ),
+    ),
+    "schedule_task": ToolDefinition(
+        name="schedule_task",
+        description=(
+            "Schedule a background agent task once at run_at or repeatedly with cron; "
+            "provide exactly one."
+        ),
+        parameters=_object(
+            {
+                "prompt": {"type": "string"},
+                "cron": {"type": ["string", "null"]},
+                "run_at": {"type": ["string", "null"]},
+                "title": {"type": "string"},
+            },
+            ["prompt", "title"],
+        ),
+    ),
+    "cancel_scheduled_task": ToolDefinition(
+        name="cancel_scheduled_task",
+        description="Cancel one active scheduled agent task by id.",
+        parameters=_object({"task_id": {"type": "integer"}}, ["task_id"]),
+    ),
+    "list_scheduled_tasks": ToolDefinition(
+        name="list_scheduled_tasks",
+        description="List the user's active scheduled agent tasks ordered by next run time.",
+        parameters=_object({}, []),
     ),
     "list_events": ToolDefinition(
         name="list_events",
@@ -295,6 +325,37 @@ def _forbidden_present(text: str, term: str) -> bool:
             continue
         return True
     return False
+
+
+_CRON_REFERENCE = datetime(2026, 7, 10, 12, 30, tzinfo=UTC)
+
+
+def _hourly_guard_check(response: LLMResponse) -> tuple[bool, str]:
+    """Accept an hourly-or-rarer schedule, or a plain answer offering that frequency."""
+
+    calls = response.message.tool_calls or []
+    if not calls:
+        text = (response.message.content or "").lower()
+        if any(term in text for term in ("час", "не чаще", "реже")):
+            return True, "offered an allowed frequency without scheduling"
+        return False, "neither scheduled nor offered an allowed frequency"
+    if len(calls) != 1 or calls[0].name != "schedule_task":
+        return False, f"expected one schedule_task call, got {[call.name for call in calls]}"
+    try:
+        cron_expr = json.loads(calls[0].arguments_json).get("cron")
+    except json.JSONDecodeError:
+        return False, "tool arguments were not JSON"
+    if not isinstance(cron_expr, str):
+        return False, "schedule_task was called without a cron expression"
+    try:
+        iterator = croniter(cron_expr, _CRON_REFERENCE)
+        firings = [iterator.get_next(datetime) for _ in range(3)]
+    except (TypeError, ValueError):
+        return False, f"invalid cron expression {cron_expr!r}"
+    gaps = [(later - earlier).total_seconds() for earlier, later in pairwise(firings)]
+    if min(gaps) < 3_600:
+        return False, f"cron {cron_expr!r} fires more often than once per hour"
+    return True, f"scheduled no more often than hourly ({cron_expr})"
 
 
 def _no_tool(
@@ -577,7 +638,7 @@ def _with_system_message(scenario: Scenario, system_message: LLMMessage) -> Scen
     )
 
 
-def build_scenarios(prompt_version: str = "v1") -> list[Scenario]:
+def build_scenarios(prompt_version: str = "v2") -> list[Scenario]:
     """Build the prompt-evaluation suite for one registered prompt version."""
 
     system_message = build_context(_DYNAMICS, prompt_version=prompt_version).system_message
@@ -1016,8 +1077,48 @@ def build_scenarios(prompt_version: str = "v1") -> list[Scenario]:
             ),
         ]
     )
-    if len(scenarios) != 46:
-        raise RuntimeError("Prompt evaluation suite must contain exactly 46 scenarios.")
+    scenarios.extend(
+        [
+            Scenario(
+                "schedule-news-background",
+                "Use a background agent task for a recurring news digest.",
+                _messages(
+                    LLMMessage(
+                        role="user", content="Каждое утро в 8 собирай новости про электромобили"
+                    )
+                ),
+                _tools("schedule_task", "create_reminder"),
+                _tool_check("schedule_task"),
+            ),
+            Scenario(
+                "reminder-doctor-call",
+                "Use a reminder for text the user formulated.",
+                _messages(LLMMessage(role="user", content="Напомни завтра в 9 позвонить врачу")),
+                _tools("schedule_task", "create_reminder"),
+                _tool_check("create_reminder"),
+            ),
+            Scenario(
+                "schedule-frequency-limit",
+                "Keep a background task no more frequent than once per hour.",
+                _messages(
+                    LLMMessage(
+                        role="user", content="Проверяй новости про электромобили каждые 5 минут"
+                    )
+                ),
+                _tools("schedule_task"),
+                _hourly_guard_check,
+            ),
+            Scenario(
+                "reschedule-morning-task",
+                "Look the task up or cancel it first when changing its schedule.",
+                _messages(LLMMessage(role="user", content="Переставь утреннюю задачу на 8 утра")),
+                _tools("list_scheduled_tasks", "cancel_scheduled_task", "schedule_task"),
+                _any_tool_check("list_scheduled_tasks", "cancel_scheduled_task"),
+            ),
+        ]
+    )
+    if len(scenarios) != 50:
+        raise RuntimeError("Prompt evaluation suite must contain exactly 50 scenarios.")
     return scenarios
 
 

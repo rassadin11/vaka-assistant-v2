@@ -22,6 +22,13 @@ _USER_DYNAMICS_HEADER = "=== USER CONTEXT ==="
 _PERSONA_HEADER = "=== ASSISTANT PERSONA ==="
 _FACTS_HEADER = "=== KNOWN FACTS ABOUT THE USER ==="
 _SUMMARY_HEADER = "=== SUMMARY OF OLDER HISTORY ==="
+_BACKGROUND_TASK = (
+    "=== BACKGROUND TASK ===\n"
+    "This is a self-contained scheduled run; the user wrote nothing and cannot see run context. "
+    "Do not ask clarifying questions or wait for a reply. Work with available information. "
+    "If there is nothing useful to report, say so in one short sentence. Do not refer to the "
+    "user's question or earlier request."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +68,7 @@ def build_context(
     tail: Sequence[LLMMessage] = (),
     lean: bool = False,
     prompt_version: str = PROMPT_VERSION,
+    background_task: bool = False,
 ) -> BuiltContext:
     """Build blocks A--F while enforcing all configured token budgets."""
 
@@ -78,6 +86,8 @@ def build_context(
     bounded_tail, trimmed, needs_summarization = _fit_tail(tail, tail_budget)
 
     sections = [core, _USER_DYNAMICS_HEADER, dynamics_block]
+    if background_task:
+        sections.append(_BACKGROUND_TASK)
     if persona_block:
         sections.extend([_PERSONA_HEADER, persona_block])
     if facts_block:

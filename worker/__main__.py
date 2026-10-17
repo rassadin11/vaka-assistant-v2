@@ -44,7 +44,7 @@ from core.profile import (
     RetrievalBackend,
     settings_from_env,
 )
-from core.prompt import prompt_version_for_model
+from core.prompt import PROMPT_VERSION
 from core.queue import CONSUMER_GROUPS, enqueue, redis_settings_from_env, stream_keys
 from core.registry_dispatcher import RegistryToolDispatcher
 from core.secrets import EnvSecretsProvider, SecretNotFoundError
@@ -501,7 +501,7 @@ def _active_inner_processor(
     )
     if route.model != settings.model:
         raise RuntimeError("The routed model must match the configured OpenRouter model.")
-    prompt_version = prompt_version_for_model(settings.model)
+    prompt_version = PROMPT_VERSION
     agent_config = AgentLoopConfig.from_env()
     agent_config = replace(
         agent_config,

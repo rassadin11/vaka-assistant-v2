@@ -177,6 +177,7 @@ class AgentProcessor:
             tail=to_llm_messages(history.tail),
             lean=envelope.kind == "text" and state is BudgetState.SHORT_CONTEXT,
             prompt_version=self._prompt_version,
+            background_task=envelope.kind == "agent_task",
         )
         messages = [
             built.system_message,
@@ -199,7 +200,11 @@ class AgentProcessor:
             if not isinstance(title, str):
                 return UNSUPPORTED_CONTENT_TEXT
             reply_text = f"⏰ {title}:\n{result.text}"
-        user_meta = _voice_meta(envelope.payload)
+        user_meta = (
+            {"source": "agent_task", "scheduled_task_id": envelope.payload.get("scheduled_task_id")}
+            if envelope.kind == "agent_task"
+            else _voice_meta(envelope.payload)
+        )
         drafts = [
             MessageDraft(role="user", content=text, meta=user_meta),
             *[_draft_from_message(message) for message in messages[initial_message_count:]],

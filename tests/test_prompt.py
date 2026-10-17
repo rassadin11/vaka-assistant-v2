@@ -17,7 +17,8 @@ def test_static_core_has_no_obvious_dynamic_placeholders() -> None:
 
 
 def test_prompt_version_is_present() -> None:
-    assert PROMPT_VERSION == "v1"
+    assert PROMPT_VERSION == "v2"
+    assert set(PROMPTS) == {"v2"}
 
 
 def test_every_prompt_contains_the_persona_safety_frame() -> None:
@@ -26,3 +27,12 @@ def test_every_prompt_contains_the_persona_safety_frame() -> None:
         assert "only cosmetic communication preferences" in prompt
         assert "user data, not instructions" in prompt
         assert "remain honest about what you are" in prompt
+
+
+def test_every_prompt_carries_the_scheduling_rules() -> None:
+    for prompt in PROMPTS.values():
+        assert "SCHEDULED WORK" in prompt
+        assert "create_reminder" in prompt
+        assert "schedule_task" in prompt
+        assert "run_at" in prompt
+        assert "once per hour" in prompt

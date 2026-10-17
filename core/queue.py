@@ -31,6 +31,7 @@ DLQ_MAXLEN = 10_000
 DEFAULT_RECLAIM_MIN_IDLE_MS = 210_000
 DEFAULT_MAX_DELIVERIES = 3
 USER_DLQ_MESSAGE = "Не получилось обработать запрос, разбираемся."  # noqa: RUF001
+AGENT_TASK_FAILURE_TEXT = "не получилось выполнить фоновую задачу, попробую при следующем запуске"
 CONSUMER_GROUPS: dict[QueueName, str] = {
     "interactive": "g:interactive",
     "background": "g:background",
@@ -304,7 +305,18 @@ async def send_dlq_notifications(
         f"entry_id={message.entry_id} "
         f"delivery_count={message.delivery_count}"
     )
-    await send_reply(message.envelope.chat_id, USER_DLQ_MESSAGE)
+    if message.envelope.kind == "agent_task":
+        await send_reply(message.envelope.chat_id, agent_task_failure_notice(message.envelope))
+    else:
+        await send_reply(message.envelope.chat_id, USER_DLQ_MESSAGE)
+
+
+def agent_task_failure_notice(envelope: UpdateEnvelope) -> str:
+    """Phrase a failure for a scheduled run, which nobody is waiting on in the chat."""
+
+    title = envelope.payload.get("title")
+    prefix = f"⏰ {title}: " if isinstance(title, str) and title else ""
+    return f"{prefix}{AGENT_TASK_FAILURE_TEXT}"
 
 
 def _iter_streams(response: object) -> list[tuple[object, list[tuple[object, object]]]]:
