@@ -91,7 +91,7 @@ OPENROUTER_MODEL=deepseek/deepseek-v4-flash
 OPENROUTER_ALLOWED_PROVIDERS=novita,parasail
 ```
 
-`OPENROUTER_MODEL` и `OPENROUTER_ALLOWED_PROVIDERS` обязательны: на проде они жили в Infisical, а без них код берёт дефолт `deepseek/deepseek-chat` и промпт `v1`. Модель и промпт связаны (`core/prompt.MODEL_PROMPT_VERSIONS`): смена модели только через eval-набор, см. мастер-план.
+`OPENROUTER_MODEL` и `OPENROUTER_ALLOWED_PROVIDERS` обязательны: на проде они жили в Infisical, а без них код берёт дефолт `deepseek/deepseek-chat`. Промпт от модели больше не зависит — с 2026-10-17 статичное ядро одно на все модели (`PROMPT_VERSION = "v2"`, решение в мастер-плане), поэтому незаданный `OPENROUTER_MODEL` даёт неверную модель, но не подменяет промпт. Смена модели по-прежнему только через прогон eval-набора, см. мастер-план. Проверка после старта: в логе воркера строка `inner processor active: agent (model=…, prompt_version=v2)`.
 
 `ALLOWED_TELEGRAM_IDS` — шлагбаум профиля: пользователь не из списка получает отказ и в БД не создаётся. Пустое значение выключает whitelist целиком — на этой установке так делать нельзя.
 
