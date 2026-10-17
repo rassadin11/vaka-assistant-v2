@@ -78,9 +78,65 @@ jobs:
           EOF
           ENV_FILE_DIR=/tmp/assistant-compose-env \
             docker compose --env-file /tmp/assistant-compose-env/.env -f infra/compose.prod.yml config -q
+      # The small profile is the live installation since 2026-10-16 (the 16 GB
+      # prod box is out of service), so compose.small.yml is the one infra file
+      # a mistake in takes the service down -- plan/small-profile.md S20.
+      - name: Validate small-profile Compose configuration
+        run: |
+          mkdir -p /tmp/assistant-small-env
+          # Compose reads small.env for the containers and never interpolates
+          # it, so an empty file satisfies env_file.
+          touch /tmp/assistant-small-env/small.env
+          # small-infra.env is what the operator passes as --env-file on the
+          # server (see the header of compose.small.yml), so the variables
+          # compose has to interpolate go in that same file here.
+          cat > /tmp/assistant-small-env/small-infra.env <<'EOF'
+          POSTGRES_PASSWORD=ci-placeholder
+          MIGRATOR_DB_PASSWORD=ci-placeholder
+          APP_DB_PASSWORD=ci-placeholder
+          SERVICE_DB_PASSWORD=ci-placeholder
+          SEARXNG_SECRET=ci-placeholder
+          MIGRATOR_DATABASE_URL=postgres://ci-placeholder
+          EOF
+          ENV_FILE_DIR=/tmp/assistant-small-env \
+            docker compose --env-file /tmp/assistant-small-env/small-infra.env \
+            -f infra/compose.small.yml config -q
       - run: docker compose -f infra/docker-compose.dev.yml up -d --wait
       - run: uv run alembic upgrade head
       - run: uv run pytest -v -m integration
+      # Two services of the small profile, not the whole stack, and the reason
+      # is correctness rather than cost: the gateway healthcheck reads the
+      # gw:polling:heartbeat key, which only appears after a successful
+      # getUpdates with a live bot token, so with a placeholder token the
+      # gateway can never become healthy and `up --wait` on the full stack
+      # would fail on a timeout instead of on a real defect. The full stack
+      # stays part of the server-side acceptance (small-profile S9/S19). These
+      # two need no secrets, and they carry the three files `config -q` cannot
+      # look inside and nothing else in CI exercises: postgresql.small.conf,
+      # redis-small.conf and 20-set-role-passwords.sh (the dev stack mounts
+      # postgresql.dev.conf, redis-queue.conf/redis-cache.conf and no password
+      # script). It costs seconds: the postgres image was already built by the
+      # dev stack above, and no app image is involved -- only `migrate` carries
+      # `build:`, and that is the same Dockerfile the `build` job builds.
+      - name: Boot small-profile Postgres and Redis
+        run: |
+          ENV_FILE_DIR=/tmp/assistant-small-env \
+            docker compose --env-file /tmp/assistant-small-env/small-infra.env \
+            -f infra/compose.small.yml up -d --wait --wait-timeout 180 postgres redis
+      # Only on failure, and only once the env stubs exist: an unhealthy
+      # container says nothing without its log, and a green run needs no dump.
+      - if: failure()
+        run: |
+          test -f /tmp/assistant-small-env/small-infra.env || exit 0
+          ENV_FILE_DIR=/tmp/assistant-small-env \
+            docker compose --env-file /tmp/assistant-small-env/small-infra.env \
+            -f infra/compose.small.yml logs postgres redis
+      - if: always()
+        run: |
+          test -f /tmp/assistant-small-env/small-infra.env || exit 0
+          ENV_FILE_DIR=/tmp/assistant-small-env \
+            docker compose --env-file /tmp/assistant-small-env/small-infra.env \
+            -f infra/compose.small.yml down -v
       - if: always()
         run: docker compose -f infra/docker-compose.dev.yml down -v
 
