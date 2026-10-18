@@ -1,17 +1,19 @@
 # Обзор архитектуры (как есть)
 
-Снимок реального состояния системы. Обновлять при значимых архитектурных изменениях, а не при каждом деплое. Детали — по ссылкам; карта прод-сервера и процедуры — [runbook-deploy.md](runbook-deploy.md).
+Снимок реального состояния системы. Обновлять при значимых архитектурных изменениях, а не при каждом деплое. Эксплуатация живой установки — [runbook-small.md](runbook-small.md).
 
-Последняя ревизия: 2026-07-18 (этап 9 задеплоен: Mini App на проде).
+Последняя ревизия: 2026-10-18 (живая установка — профиль `small`; прежний прод на 16 ГБ выведен из эксплуатации 2026-10-16).
 
 ## Что это
 
-Multi-tenant Telegram-ассистент: один бот на всех пользователей, изоляция данных через PostgreSQL RLS (`SET LOCAL app.user_id` в каждой транзакции роли `app`). LLM — DeepSeek V4 Flash через OpenRouter (промпт v2-flash; дефолт в коде пока `deepseek-chat`, боевая модель задана конфигом в Infisical). Плюс Telegram Mini App с экранами «Календарь» и «Финансы».
+Multi-tenant Telegram-ассистент: один бот на всех пользователей, изоляция данных через PostgreSQL RLS (`SET LOCAL app.user_id` в каждой транзакции роли `app`). LLM — через OpenRouter; боевая модель задаётся env `OPENROUTER_MODEL` (на живой установке — `deepseek/deepseek-v4-flash`), дефолт в коде — `deepseek/deepseek-chat`. Статичное ядро промпта одно на все модели (`PROMPT_VERSION = "v2"`). Плюс Telegram Mini App с экранами «Календарь», «Финансы» и «Заметки».
+
+Одна кодовая база, два профиля развёртывания (`DEPLOYMENT_PROFILE=prod|small`, [plan/small-profile.md](../plan/small-profile.md)): инфраструктура у них разная, код и тесты общие. Развёрнут сейчас только `small`.
 
 ## Поток данных бота
 
 ```
-Telegram → Caddy (443, TLS) → gateway (FastAPI, webhook)
+Telegram ← polling (gateway; в профиле prod — webhook через Caddy)
   → дедуп update_id → rate limit (token bucket 20/мин) → Redis Streams
      q:{interactive|background}:{0..15} (партиция по пользователю)
   → worker (пул asyncio): per-user lock → агентный цикл (LLM + инструменты)
@@ -19,12 +21,12 @@ Telegram → Caddy (443, TLS) → gateway (FastAPI, webhook)
      → диалог/стоимость в Postgres (messages, usage, tool_calls_log)
 ```
 
-- **Надёжность очереди**: at-least-once, reclaim незаACKнутых через 210 с, после 3 доставок — DLQ `q:dlq` с алертом; порядок сообщений одного пользователя гарантирован (per-user lock + predecessor-guard). Interactive обрабатывается прежде background.
-- **Устойчивость LLM** (`core/llm_resilient.py`): семафор 8 одновременных запросов, retry ×3 с джиттером на 429/5xx, circuit breaker → fallback-модель на 300 с + алерт. OpenRouter всегда с `data_collection: deny` и allowlist провайдеров.
+- **Надёжность очереди**: at-least-once, reclaim незаACKнутых через 210 с, после 3 доставок — DLQ `q:dlq`; порядок сообщений одного пользователя гарантирован (per-user lock + predecessor-guard). Interactive обрабатывается прежде background.
+- **Устойчивость LLM** (`core/llm_resilient.py`): семафор одновременных запросов, retry с джиттером на 429/5xx, circuit breaker → fallback-модель. OpenRouter всегда с `data_collection: deny` и allowlist провайдеров.
 - **Контекст** (`core/context_manager.py`, спека [plan/system-prompt-spec.md](../plan/system-prompt-spec.md)): блоки A–F (системный промпт, персона C2, память, суммаризация старой истории, хвост диалога); суммаризация — fire-and-forget после ответа.
-- **Инструменты** (`tools/`, реестр [tools_registry_v1.md](../tools_registry_v1.md)): финансы, напоминания (+шедулер в воркере, тик 60 с), долговременная память (pgvector, автоинжект ≥0.80), web_search/fetch_page (SearXNG + SSRF-фильтр), PDF (+OCR tesseract) и поиск по документам, отложенные agent_task, персона ассистента. `user_id` никогда не берётся из аргументов LLM; mutating-инструменты идемпотентны (`idem:{update_id}:{n}`).
-- **Другие модальности**: голос — Groq whisper-large-v3 (лимит 10 мин/день), фото — OCR → текст в агентный цикл.
-- **Лимиты и деградация** (`core/spend.py`, `core/limits.py`): дневной ₽-бюджет по тарифу со ступенями 100/120/150% (без фоновых → lean-контекст → мягкий отказ), счётчик сообщений/день, предупреждения на 80% по всем осям; всё в Redis с ключами по локальной дате пользователя, fail-open.
+- **Инструменты** (`tools/`, реестр [tools_registry_v1.md](../tools_registry_v1.md)): финансы, напоминания и регулярные agent-задачи (шедулер в воркере, тик 60 с), долговременная память с автоинжектом, тематические заметки, web_search/fetch_page (SearXNG + SSRF-фильтр), PDF (+OCR tesseract) и поиск по документам, персона ассистента, часовой пояс. Поиск по фактам и документам — полнотекстовый Postgres в `small`, векторный (эмбеддинги) в `prod` (`RETRIEVAL_BACKEND`). Модель получает весь набор инструментов сразу — профили реестра §4 не реализованы. `user_id` никогда не берётся из аргументов LLM; mutating-инструменты идемпотентны (`idem:{update_id}:{n}`).
+- **Другие модальности**: голос — Groq whisper-large-v3, фото — OCR → текст в агентный цикл.
+- **Лимиты и деградация** (`core/spend.py`, `core/limits.py`, числа — `core/profile.py`): дневной ₽-бюджет со ступенями деградации (без фоновых → lean-контекст → мягкий отказ), счётчики по осям тарифа, предупреждения на 80 %; всё в Redis с ключами по локальной дате пользователя, fail-open.
 
 ## Mini App
 
@@ -36,23 +38,23 @@ Telegram WebView → Caddy /app/* → webapp (FastAPI)
     через тот же ResilientLLMProvider с общим ₽-бюджетом пользователя
 ```
 
-Frontend — `miniapp/` (Vite + Preact + TS), собирается в статику и раздаётся webapp. Вход: кнопка меню бота, inline-кнопки после финансовых/календарных ответов, deep-link `start_param`. Решения — [plan/stage-9-architecture.md](../plan/stage-9-architecture.md).
+Frontend — `miniapp/` (Vite + Preact + TS), собирается в статику и раздаётся webapp. Вход: кнопка меню бота, inline-кнопки после финансовых/календарных ответов, deep-link `start_param`. Решения — [plan/archive/stages/stage-9-architecture.md](../plan/archive/stages/stage-9-architecture.md), спеки экранов — [plan/specs/](../plan/specs/).
 
-## Сервисы прод-стека (17 контейнеров)
+## Сервисы живой установки (профиль `small`, 8 контейнеров)
 
 | Группа | Контейнеры | Роль |
 |--------|-----------|------|
-| Приложение | gateway, worker, webapp | приём апдейтов; агентный цикл + шедулер + outbox; Mini App API/SPA |
-| Данные | postgres (+pgvector), pgbouncer, redis-queue, redis-cache | БД с RLS; пул (transaction mode); очередь+бюджеты; кэш/лимиты/семафоры |
-| Секреты | infisical + его postgres и redis | секреты приложения; контейнеры читают через `core/secrets_entrypoint` при старте |
-| Вспомогательные | caddy, searxng, embeddings | TLS/маршрутизация (`/webhook`, `/app/*`, `/grafana`); мета-поиск; эмбеддинги multilingual-e5-large |
-| Наблюдаемость | prometheus, grafana, blackbox, node-exporter, cadvisor | метрики; дашборды «Технический»/«Продуктовый» + Unified Alerting → Telegram владельца; пробы; метрики хоста и контейнеров |
+| Приложение | gateway, worker, webapp | приём апдейтов (polling); агентный цикл + шедулер + outbox; Mini App API/SPA |
+| Данные | postgres, redis | БД с RLS (без PgBouncer); один Redis `noeviction` — очередь, бюджеты, кэш с TTL |
+| Вспомогательные | caddy, searxng, migrate | TLS и маршрут `/app/*` ради Mini App; мета-поиск; одноразовый прогон миграций Alembic |
 
-Логи всех сервисов — JSON в stdout с единым `trace_id` на задачу (сбор контекста — [runbook.md](runbook.md) §6-7). Бэкапы — pgBackRest (7 дней + 4 недели, WAL) + RDB redis-queue + дамп Infisical; ежемесячная репетиция восстановления.
+Секреты — env-файлы с правами 600 на сервере (без Infisical). Наблюдаемость — `docker compose logs` и healthcheck'и (без Prometheus/Grafana). Бэкапы — `pg_dump` по cron, пока только локально. Логи всех сервисов — JSON в stdout с единым `trace_id` на задачу. Подробности и процедуры — [runbook-small.md](runbook-small.md).
+
+**Профиль `prod`** (17 контейнеров: + pgbouncer, второй redis, infisical, embeddings, prometheus/grafana/blackbox/node-exporter/cadvisor; webhook, pgBackRest, деплой CI → GHCR → Ansible) остаётся в коде и compose-файлах, но не развёрнут. Его рунбук — в архиве: [archive/runbook-deploy.md](archive/runbook-deploy.md).
 
 ## Где искать детали
 
-- Схема БД (13 таблиц + assistant_profile и webapp-правки) — [plan/db-schema.md](../plan/db-schema.md).
-- Архитектурные решения и история — [implementation_plan_v1.md](../implementation_plan_v1.md), статус — [plan/progress.md](../plan/progress.md).
+- Схема БД (состав таблиц, роли, RLS, служебные функции; число таблиц — только там) — [plan/db-schema.md](../plan/db-schema.md).
+- Принятые решения — [plan/decisions.md](../plan/decisions.md); что дальше — [plan/roadmap.md](../plan/roadmap.md); статус — [plan/progress.md](../plan/progress.md).
 - Инварианты кода и регламент — [CLAUDE.md](../CLAUDE.md).
-- Dev-окружение (`make dev-up`, роли БД, бэкапы) — [infra/README.md](../infra/README.md); прод — [runbook-deploy.md](runbook-deploy.md).
+- Dev-окружение (`make dev-up`, роли БД) — [infra/README.md](../infra/README.md); инциденты — [runbook.md](runbook.md).

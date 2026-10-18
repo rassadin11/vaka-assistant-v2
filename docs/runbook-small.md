@@ -1,12 +1,12 @@
 # Runbook профиля «small»
 
-Эксплуатация установки на 2 ГБ для закрытого круга 5–10 человек. План профиля — [plan/small-profile.md](../plan/small-profile.md); прод (16 ГБ, домен, Infisical, Ansible) живёт по другому документу — [docs/runbook-deploy.md](runbook-deploy.md), не путать.
+Эксплуатация установки на 2 ГБ для закрытого круга 5–10 человек. План профиля — [plan/small-profile.md](../plan/small-profile.md); прежний прод (16 ГБ, Infisical, Ansible) выведен из эксплуатации 2026-10-16, его рунбук — в архиве: [archive/runbook-deploy.md](archive/runbook-deploy.md), не путать.
 
 Статус документа: написан до появления сервера (2026-09-07), **выверен по первому развёртыванию 2026-10-15** (Ubuntu 24.04, 1 vCPU, 2 ГБ, сервер `31.77.203.98`). Всё, что помечено «проверено локально», проверено на dev-машине; всё остальное проверяется при первом развёртывании и правится по факту. Пункт S16 закрывается только после того, как по этому документу кто-то развернул стек с нуля.
 
 ## 0. Чем эта установка отличается
 
-| | прод | small |
+| | профиль prod (в коде, не развёрнут) | small |
 |---|---|---|
 | контейнеров | 17 | 8 (6 до Mini App) |
 | Telegram | webhook + Caddy + домен | polling; Caddy и домен есть, но только ради Mini App (S19) |
@@ -91,7 +91,7 @@ OPENROUTER_MODEL=deepseek/deepseek-v4-flash
 OPENROUTER_ALLOWED_PROVIDERS=novita,parasail
 ```
 
-`OPENROUTER_MODEL` и `OPENROUTER_ALLOWED_PROVIDERS` обязательны: на проде они жили в Infisical, а без них код берёт дефолт `deepseek/deepseek-chat`. Промпт от модели больше не зависит — с 2026-10-17 статичное ядро одно на все модели (`PROMPT_VERSION = "v2"`, решение в мастер-плане), поэтому незаданный `OPENROUTER_MODEL` даёт неверную модель, но не подменяет промпт. Смена модели по-прежнему только через прогон eval-набора, см. мастер-план. Проверка после старта: в логе воркера строка `inner processor active: agent (model=…, prompt_version=v2)`.
+`OPENROUTER_MODEL` и `OPENROUTER_ALLOWED_PROVIDERS` обязательны: на проде они жили в Infisical, а без них код берёт дефолт `deepseek/deepseek-chat`. Промпт от модели больше не зависит — с 2026-10-17 статичное ядро одно на все модели (`PROMPT_VERSION = "v2"`, D-15 в [plan/decisions.md](../plan/decisions.md)), поэтому незаданный `OPENROUTER_MODEL` даёт неверную модель, но не подменяет промпт. Смена модели по-прежнему только через прогон eval-набора (D-14). Проверка после старта: в логе воркера строка `inner processor active: agent (model=…, prompt_version=v2)`.
 
 `ALLOWED_TELEGRAM_IDS` — шлагбаум профиля: пользователь не из списка получает отказ и в БД не создаётся. Пустое значение выключает whitelist целиком — на этой установке так делать нельзя.
 

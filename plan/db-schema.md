@@ -2,6 +2,8 @@
 
 Статус: зафиксирована (отложенное обсуждение №1 закрыто). Изменения — правкой этого файла до реализации, не после.
 
+Расширения после фиксации: `notes` (внеплановая задача 2026-07-31), полнотекстовые колонки (S3, 2026-09-07), `friend_links` / `friend_invites` и две колонки `scheduled_tasks` (общие объекты часть 1, 2026-10-18 — `plan/specs/shared-objects-spec.md`; реализация ждёт отложенного обсуждения №12).
+
 ## Сквозные решения
 
 - **PK**: uuid v7 для сущностей, не фигурирующих в аргументах модели (users, messages, dialog_summaries, memory_facts, outbox_actions); **bigint identity** для model-facing сущностей (transactions, scheduled_tasks, documents, doc_chunks) и логов (tool_calls_log, usage). Причина: DeepSeek должен уметь безошибочно воспроизводить id в аргументах инструментов — короткие числа надёжнее uuid. Утечки счётчика нет: id видны только владельцу, доступ режет RLS.
@@ -16,7 +18,9 @@
 - **Партиционирование**: tool_calls_log и usage — по месяцу (`created_at`), pg_partman; ключ партиции входит в PK. Ретеншн партиций — отложенное обсуждение №9 (сроки хранения).
 - **Хранение сообщений**: бессрочно до GDPR-удаления пользователя; суммаризация ничего не стирает.
 
-## Таблицы (14)
+## Таблицы (16: 14 созданы миграциями, 2 ждут реализации)
+
+Созданы: 13 базовых (миграция `20260709_0001`) + `notes` (`20260731_0004`). Ждут реализации: `friend_links` и `friend_invites` — общие объекты часть 1, миграции нет (блокер — обсуждение №12).
 
 ```
 users
@@ -120,9 +124,44 @@ scheduled_tasks                              -- напоминания И agent-
   next_run_at     timestamptz NOT NULL       -- единое поле тика шедулера; пересчёт по croniter в users.timezone
   status          text CHECK (active|done|cancelled)
   last_run_at, created_at
+  group_id        uuid                       -- общие напоминания (2026-10-18): NULL = личная задача, иначе метка фан-аута
+  created_by_user_id uuid FK users(id) ON DELETE SET NULL   -- NULL = создал владелец строки
 INDEX (status, next_run_at)                  -- тик шедулера (роль service)
 INDEX (user_id, status)                      -- list_reminders / list_scheduled_tasks
+INDEX (group_id) WHERE group_id IS NOT NULL
 ```
+Общее напоминание — N строк с общим `group_id`, по одной на участника (фан-аут,
+`plan/specs/shared-objects-spec.md` §2): модель «одна строка — один владелец» и RLS-шаблон
+не меняются, `next_run_at` считается по таймзоне каждого участника.
+`group_id` без FK — группа не сущность, а метка; `created_by_user_id` с SET NULL,
+чтобы GDPR-удаление создателя не ломало напоминание второго участника.
+
+```
+friend_links                                 -- дружба (2026-10-18); две зеркальные строки на связь
+  user_id         uuid FK users(id) CASCADE NOT NULL
+  friend_user_id  uuid FK users(id) CASCADE NOT NULL
+  created_at      timestamptz NOT NULL DEFAULT now()
+  PK (user_id, friend_user_id)
+  CHECK (user_id <> friend_user_id)
+INDEX (friend_user_id)                       -- обратный обход в служебных функциях
+```
+Зеркальные строки выбраны осознанно: RLS-политика остаётся однополевым шаблоном
+`user_id = app.user_id`, без подзапроса по членству, и CI-тест на наличие политики
+не меняется.
+
+```
+friend_invites                               -- одноразовые коды приглашений (2026-10-18)
+  id              uuid PK (v7)
+  user_id         uuid FK users(id) CASCADE NOT NULL   -- приглашающий, владелец строки
+  code            text UNIQUE NOT NULL                -- secrets.token_urlsafe(16)
+  status          text CHECK (pending|accepted|revoked|expired) DEFAULT 'pending'
+  invitee_user_id uuid FK users(id) CASCADE            -- заполняется при приёме
+  expires_at      timestamptz NOT NULL                 -- создание + 7 суток
+  created_at / accepted_at
+INDEX (user_id, status)
+```
+Колонка-владелец названа `user_id` ради генератора политик и CI-теста; приглашаемый
+читает код не напрямую, а через `accept_friend_invite` (ниже).
 
 ```
 documents
@@ -241,8 +280,29 @@ SET search_path = pg_catalog, public
 Функция не меняет зафиксированное количество таблиц. Её добавление — отдельная
 обратно совместимая Alembic migration этапа 9.1; downgrade удаляет только функцию.
 
+### Функции общих объектов — часть 1 (2026-10-18)
+
+Контракты и проверки внутри функций — `plan/specs/shared-objects-spec.md` §4. Здесь
+фиксируется только то, что относится к схеме:
+
+- `accept_friend_invite(p_code text, p_invitee uuid)` → `(status text, inviter_user_id uuid)`;
+- `create_shared_reminder(p_creator uuid, p_participants uuid[], p_text text, p_runs jsonb, p_cron text)` → `setof (user_id uuid, task_id bigint)`;
+- `cancel_shared_reminder_group(p_caller uuid, p_group uuid, p_scope text)` → `integer`.
+
+Все три — `SECURITY DEFINER`, владелец `migrator`, `SET search_path = pg_catalog, public`,
+миграция делает `REVOKE ALL ... FROM PUBLIC` и `GRANT EXECUTE ... TO app`; роль
+`service` их не получает. Это единственный разрешённый способ кросс-пользовательской
+записи из пользовательского пути: роль `service` инструментам LLM не выдаётся.
+
+**Ловушка реализации**: под `SECURITY DEFINER` политики RLS не действуют, поэтому
+каждая проверка лимита и каждая выборка внутри этих функций обязана нести явный
+`WHERE user_id = ...`. Существующий `core.reminders_service.create_reminder`
+опирается на неявный RLS-скоуп (`COUNT(*)` без фильтра по пользователю) — копировать
+этот запрос в функцию нельзя.
+
 ## Примечания для исполнителя миграции
 
 - GDPR-удаление (7.5): DELETE users каскадом закрывает всё, кроме tool_calls_log/usage (без FK) — их чистить отдельным DELETE по user_id в той же операции.
-- RLS включается (`ENABLE ROW LEVEL SECURITY`) на всех 14 таблицах; на партиционированных — на родителе.
+- GDPR-удаление и общие объекты (2026-10-18): каскад убирает `friend_links` с обеих сторон и `friend_invites` (оба FK CASCADE); строки `scheduled_tasks` второго участника остаются — их владелец он, а `created_by_user_id` обнуляется (SET NULL). Текст общего напоминания, созданного удаляемым пользователем, сохраняется в данных второго участника: решение осознанное, иначе удаление одного человека тихо ломало бы напоминания другого (`plan/specs/shared-objects-spec.md` §11).
+- RLS включается (`ENABLE ROW LEVEL SECURITY`) на каждой таблице с колонкой `user_id` — сейчас это 14 созданных, плюс 2 таблицы общих объектов в их миграции; на партиционированных — на родителе.
 - TaskContext.user_id в реестре инструментов — внутренний uuid users.id (не tg_user_id).

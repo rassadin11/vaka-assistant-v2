@@ -1,17 +1,15 @@
 # Telegram-сервис персональных ассистентов
 
-Multi-tenant сервис: один бот, общий пул asyncio-воркеров, изоляция пользователей через PostgreSQL RLS. Стек: Python 3.12, FastAPI, aiogram 3.x, PostgreSQL 16 + pgvector + PgBouncer, Redis ×2, Alembic, Caddy; LLM — DeepSeek через OpenRouter. Плюс Telegram Mini App (календарь + финансы): backend `webapp/` (FastAPI), frontend `miniapp/` (Vite + Preact + TS).
+Multi-tenant сервис: один бот, общий пул asyncio-воркеров, изоляция пользователей через PostgreSQL RLS. Стек: Python 3.12, FastAPI, aiogram 3.x, PostgreSQL 16 (+pgvector), Redis, Alembic, Caddy; LLM — через OpenRouter. Плюс Telegram Mini App (календарь, финансы, заметки): backend `webapp/` (FastAPI), frontend `miniapp/` (Vite + Preact + TS).
 
-**Прод**: `vaka-assistant.ru`, бета через @vAssistantv2testbot. Эксплуатация и деплой — [docs/runbook-deploy.md](docs/runbook-deploy.md).
+**Живая установка**: закрытая бета через @vAssistantv2testbot на сервере профиля `small` (2 ГБ, polling), Mini App — `https://vaka-assistant.ru/app/`. Эксплуатация и деплой — [docs/runbook-small.md](docs/runbook-small.md). Прежний прод на 16 ГБ выведен из эксплуатации 2026-10-16; профиль `prod` остаётся в коде.
 
 ## Документация
 
-- [docs/architecture-overview.md](docs/architecture-overview.md) — обзор системы как она есть (сервисы, потоки данных).
-- [implementation_plan_v1.md](implementation_plan_v1.md) — мастер-план и архитектурные решения.
-- [plan/](plan/) — детализация этапов, схема БД, требования, прогресс ([индекс](plan/README.md)).
-- [tools_registry_v1.md](tools_registry_v1.md) — спецификация инструментов.
-- [docs/](docs/) — runbook'и, журнал разработки, приёмочные отчёты ([индекс](docs/README.md)).
-- [CLAUDE.md](CLAUDE.md) — протокол работы для агентов-исполнителей; [AGENTS.md](AGENTS.md) — то же для внешних CLI-агентов (Codex).
+- [CLAUDE.md](CLAUDE.md) — протокол работы: что читать перед задачей, регламент, инварианты кода.
+- [plan/](plan/README.md) — куда идём ([roadmap](plan/roadmap.md)), что решено ([decisions](plan/decisions.md)), что сделано ([progress](plan/progress.md)), справочники и спеки фич.
+- [tools_registry_v1.md](tools_registry_v1.md) — реестр инструментов LLM.
+- [docs/](docs/README.md) — обзор архитектуры, рунбуки, журнал разработки.
 
 ## Разработка
 

@@ -5,7 +5,7 @@ implemented and used in production (31.76.15.130): `base` (server hardening +
 `deploy` user), `docker` (Docker Engine + compose plugin), `app` (app dirs,
 `compose.prod.yml`, Caddy/Prometheus/Grafana configs, systemd unit, webapp).
 Day-to-day operations (deploy, secrets, rollback) live in
-[docs/runbook-deploy.md](../../docs/runbook-deploy.md); infra changes go through
+[docs/archive/runbook-deploy.md](../../docs/archive/runbook-deploy.md); infra changes go through
 the `app` role only — never edit files on the server by hand.
 
 ## Setup

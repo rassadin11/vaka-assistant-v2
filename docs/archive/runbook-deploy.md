@@ -1,0 +1,194 @@
+# Runbook: деплой и эксплуатация прода
+
+> **Статус на 2026-10-17: эта установка выведена из эксплуатации.** Сервер `31.76.15.130` не отвечает
+> с вечера 15.10 (проверено физическим маршрутом мимо VPN, SOCKS-прокси VPN и раннером GitHub),
+> вебхук с бота снят, домен `vaka-assistant.ru` переведён на малый сервер. Сервис, включая Mini App,
+> живёт в профиле small — **[docs/runbook-small.md](../runbook-small.md)**. Этот документ сохранён как
+> описание прод-профиля: он актуален для его восстановления, но ни одна процедура здесь сейчас не
+> применима к работающему сервису.
+
+Собрано по факту живых приёмок 1.11–1.12 (2026-07-16). Обновлять при каждом изменении процедур.
+
+## Карта прода
+
+| Что | Значение |
+|-----|----------|
+| Сервер | 31.76.15.130 (Ubuntu 24.04), SSH-пользователь `deploy` (ключевой доступ, пароли выключены) |
+| Домен | `vaka-assistant.ru` → Caddy (TLS Let's Encrypt), наружу только 80/443 |
+| Приложение | `/opt/assistant` (compose.prod.yml, конфиги), systemd-юнит `assistant.service` (enabled, поднимает стек после reboot) |
+| Конфиги/секреты | `/etc/assistant/`: `infra.env` (интерполяция compose, симлинк `/opt/assistant/.env`), `bootstrap.env` (identity Infisical для app), `deploy.env` (пин образа `APP_IMAGE=`), `deploy.env.prev` (для отката), `migrator.env` (DSN миграций), `prod-seed.env` (источник досева, root 0600) |
+| Образы | GHCR `ghcr.io/rassadin11/vaka-assistant-v2` (+`-caddy`, `-searxng`); собирает workflow **Images** на push в main; теги `latest` и `sha-<full_sha>`; pull анонимный |
+| Стек | 17 контейнеров: gateway, worker, postgres (+pgvector), pgbouncer, redis-queue, redis-cache, infisical (+его postgres+redis), caddy, searxng, embeddings (TEI), prometheus, grafana, blackbox, node-exporter, cadvisor |
+| Секреты приложения | Infisical (в стеке, `http://infisical:8080`), проект prod; контейнеры читают через `core/secrets_entrypoint` при старте |
+| Боты | **@vAssistantv2testbot** — ассистент (webhook, бета); несмотря на «test» в имени это БОЕВОЙ бот, которым владелец пользуется лично. **@vAssistantv2workbot** — канал сводок/алертов владельцу (chat_id 587963165), webhook НЕ ставить (сломает getUpdates) |
+| Канал алертов | `TELEGRAM_ALERT_BOT_TOKEN` в `/etc/assistant/infra.env` обязан быть токеном **@vAssistantv2workbot**. До 2026-07-20 там лежал токен бота-ассистента, из-за чего алерты Grafana и технические сводки падали владельцу в рабочий чат с ассистентом. Токен подставляется в Grafana как переменная окружения (`compose.prod.yml` → `contact-points.yml`), поэтому после смены контейнер надо **пересоздать** (`docker compose up -d --force-recreate grafana`), а не перезапустить. Проверка: `docker exec …-grafana-1 sh -c 'wget -qO- https://api.telegram.org/bot$TELEGRAM_ALERT_BOT_TOKEN/getMe'`. **Уведомление приходит НЕ мгновенно**: `policies.yml` задаёт только получателя, поэтому действуют дефолты Alertmanager — `group_wait` 30 с до первого сообщения группы, `group_interval` 5 мин между следующими, `repeat_interval` 4 ч. Отсутствие сообщения в первые полминуты после firing — норма, а не поломка канала |
+| Машина владельца | ключи API в `C:/Users/Artem/.assistant/bootstrap.env`; SSH-ключ CI-деплоя `C:/Users/Artem/.assistant/deploy-ci-key` (pub уже в authorized_keys deploy) |
+| Модель | `deepseek/deepseek-v4-flash` (OpenRouter, data_collection=deny, провайдеры novita→parasail); задана через Infisical `OPENROUTER_MODEL`/`OPENROUTER_ALLOWED_PROVIDERS` (переключено 2026-07-17); дефолт в коде пока `deepseek/deepseek-chat`. Промпт к модели не привязан: с 2026-10-17 ядро одно (`PROMPT_VERSION = "v2"`, бывший текст `v2-flash`), связка `MODEL_PROMPT_VERSIONS` удалена |
+
+## Штатный деплой новой версии
+
+GitHub → Actions → **Deploy** → Run workflow → `image_tag` = `latest` или `sha-<full_sha>` (пин).
+Workflow сам: валидирует тег → сохраняет текущий `deploy.env` в `.prev` → пишет новый пин → `docker compose pull` → миграции (`alembic upgrade head` одноразовым контейнером под ролью migrator) → `systemctl restart assistant` → ждёт healthy gateway+caddy до 5 минут.
+Секреты workflow: `DEPLOY_HOST`, `DEPLOY_SSH_KEY` (добавлены владельцем).
+
+**Этот путь на 2026-10-16 ни разу не срабатывал** — все выкладки прода шли ручным путём ниже.
+Прогон 2026-10-15 (`sha-5045061…`) упал на шаге `Deploy application` двумя независимыми причинами:
+`ssh: no key found` (в секрете `DEPLOY_SSH_KEY` нет приватного ключа в разбираемом виде — нужно
+перезаписать его полным содержимым `C:/Users/Artem/.assistant/deploy-ci-key`, со строками
+BEGIN/END) и `dial tcp ***:22: i/o timeout` (раннер GitHub не дошёл до порта 22; UFW пускает 22
+отовсюду и с машины владельца порт открыт, так что проверять надо значение `DEPLOY_HOST` и
+доступность сервера из сетей Azure). Пока это не починено — деплоить ручным путём.
+
+**Откат**: перезапустить Deploy с тегом из `/etc/assistant/deploy.env.prev` (посмотреть: `ssh deploy@31.76.15.130 sudo cat /etc/assistant/deploy.env.prev`). Миграции вперёд-совместимы (expand-contract), откат кода без отката БД.
+
+## Ручной деплой с сервера (рабочий путь)
+
+С машины владельца нужен SSH, а он ходит мимо MantaRay только со статическим маршрутом
+(раздел «Mini App (webapp)» ниже, пункт 0): без маршрута SSH виснет на banner exchange, а
+`Test-NetConnection … -Port 22` при этом лживо отвечает `True` (это fakedns).
+
+```bash
+ssh deploy@31.76.15.130
+sudo cp /etc/assistant/deploy.env /etc/assistant/deploy.env.prev
+echo 'APP_IMAGE=ghcr.io/rassadin11/vaka-assistant-v2:<TAG>' | sudo tee /etc/assistant/deploy.env
+cd /opt/assistant
+docker compose -f compose.prod.yml --env-file .env --env-file /etc/assistant/deploy.env pull
+docker run --rm --network personal-assistant-prod_default \
+  --env-file /etc/assistant/migrator.env \
+  ghcr.io/rassadin11/vaka-assistant-v2:<TAG> \
+  sh -ec 'export MIGRATIONS_DATABASE_URL=${MIGRATOR_DATABASE_URL:?}; exec alembic upgrade head'
+sudo systemctl restart assistant
+docker ps --format '{{.Names}}\t{{.Status}}'   # все должны стать healthy (embeddings — до 10 мин при первом старте)
+```
+
+Грабля: DSN в `migrator.env` обязан быть со схемой `postgresql+psycopg://` (psycopg v3; с `postgresql://` SQLAlchemy требует psycopg2, которого нет в образе).
+
+## Изменения инфраструктуры (compose, конфиги, юнит)
+
+Правки только через Ansible-роль в репо (`infra/ansible/roles/app`), катить с машины владельца:
+
+```bash
+docker build -q -t local/ansible-runner - <<'EOF'
+FROM python:3.12-slim
+RUN apt-get update -qq && apt-get install -y -qq openssh-client >/dev/null && pip install -q ansible-core
+EOF
+MSYS_NO_PATHCONV=1 docker run --rm \
+  -v "D:\claude-projects\personal-assistant:/work" -v "C:\Users\Artem\.ssh:/keys:ro" \
+  -w /work/infra/ansible -e ANSIBLE_HOST_KEY_CHECKING=False local/ansible-runner \
+  bash -c "mkdir -p /root/.ssh && cp /keys/id_* /root/.ssh/ && chmod 600 /root/.ssh/id_* ; \
+    ansible-galaxy collection install -r requirements.yml >/dev/null; \
+    ansible-playbook -i inventory/prod.yml site.yml -e prod_server_ip=31.76.15.130 --tags app"
+```
+
+Прогонять дважды: второй прогон должен дать `changed=0` (идемпотентность). Роль НЕ трогает содержимое `deploy.env` и секретные env-файлы (`force: no`) — только раскладывает шаблоны при отсутствии.
+
+## Секреты (добавить/обновить в Infisical)
+
+1. Дописать `KEY=value` в `/etc/assistant/prod-seed.env` на сервере (передавать значения только через SSH stdin, не через чат/коммиты).
+2. Досеять (идемпотентно; ключи перечислять ВСЕ нужные, не только новые):
+
+```bash
+ssh deploy@31.76.15.130
+git clone -q --depth 1 https://github.com/rassadin11/vaka-assistant-v2 /tmp/repo-b
+sudo docker run --rm --network personal-assistant-prod_default \
+  -v /tmp/repo-b:/repo:ro -v /etc/assistant:/etc/assistant \
+  -e INFISICAL_URL=http://infisical:8080 -e BOOTSTRAP_ADMIN_EMAIL=admin@vaka-assistant.ru \
+  -e BOOTSTRAP_ORG_NAME='Personal Assistant' -e BOOTSTRAP_ENV_NAME=Production -e BOOTSTRAP_ENV_SLUG=prod \
+  -e BOOTSTRAP_INPUT_ENV_PATH=/etc/assistant/prod-seed.env \
+  -e BOOTSTRAP_OUTPUT_ENV_PATH=/etc/assistant/infisical-prod.env \
+  -e BOOTSTRAP_SEED_KEYS=DATABASE_URL,SERVICE_DATABASE_URL,WEBHOOK_SECRET_PATH,TELEGRAM_WEBHOOK_SECRET_TOKEN,PUBLIC_URL,TELEGRAM_BOT_TOKEN,OPENROUTER_API_KEY,GROQ_API_KEY,ADMIN_TELEGRAM_IDS \
+  -w /repo ghcr.io/rassadin11/vaka-assistant-v2:latest python infra/infisical/bootstrap.py
+rm -rf /tmp/repo-b
+sudo systemctl restart assistant   # контейнеры перечитывают секреты только при старте
+```
+
+## Webhook Telegram
+
+Ставится один раз (и после смены токена/домена/секретного пути):
+
+```bash
+ssh deploy@31.76.15.130 sudo docker run --rm --network personal-assistant-prod_default \
+  --env-file /etc/assistant/bootstrap.env ghcr.io/rassadin11/vaka-assistant-v2:latest \
+  python -m core.secrets_entrypoint -- python -m gateway set-webhook
+```
+
+Проверка: `getWebhookInfo` токеном бота — url `https://vaka-assistant.ru/webhook/…`, `last_error_message` пуст.
+
+## Подсказки команд («/» в чате)
+
+Ставится один раз (и после изменения списка команд в `gateway/__main__.py::_set_my_commands`):
+
+```bash
+ssh deploy@31.76.15.130 sudo docker run --rm --network personal-assistant-prod_default \
+  --env-file /etc/assistant/bootstrap.env ghcr.io/rassadin11/vaka-assistant-v2:latest \
+  python -m core.secrets_entrypoint -- python -m gateway set-my-commands
+```
+
+Проверка: `getMyCommands` токеном бота → start/help/feedback/timezone; в чате при вводе «/» появляется список.
+
+## Mini App (webapp) — одноразовая активация на проде
+
+Выполнено 2026-07-18. После этого штатные деплои поднимают webapp автоматически (он в
+`compose.prod.yml`). Одноразовые шаги (с машины владельца, SSH к VPS):
+
+0. **SSH через MantaRay VPN**: прямой SSH виснет на banner exchange (fakedns). Временный
+   статический маршрут в admin-PowerShell: `route add 31.76.15.130 mask 255.255.255.255
+   <phys_gateway> if <phys_ifindex>` (шлюз/ifindex физ-адаптера из `Get-NetIPConfiguration | ?
+   {$_.IPv4DefaultGateway}`; подробности — memory `machine-and-workflow-quirks`). Ansible и docker
+   команды к серверу работают и из контейнера (host route действует на egress).
+1. **Инфраструктура (Ansible)** — раздел «Изменения инфраструктуры» выше: роль `app` раскладывает
+   webapp в compose, Caddy `/app/*`, Prometheus target и ПУСТОЙ `webapp.env` (force:false). Стек НЕ
+   рестартит — безопасно, бот не падает. Прогнать дважды (2-й = changed=0).
+2. **Секрет + identity webapp** (bootstrap **новым** образом — старый не знает webapp в
+   SERVICE_NAMES): добавить `WEBAPP_SESSION_SECRET` в `/etc/assistant/prod-seed.env`
+   (`openssl rand -hex 32`, идемпотентно), затем bootstrap (раздел «Секреты») с
+   `BOOTSTRAP_SEED_KEYS=WEBAPP_SESSION_SECRET` и образом `sha-<new>` — создаёт identity `webapp`,
+   существующие gateway/worker/scheduler сохраняет, `bootstrap.env` не трогает.
+3. **Заполнить `/etc/assistant/webapp.env`**: `INFISICAL_URL/PROJECT_ID/ENV` — из `bootstrap.env`;
+   `INFISICAL_CLIENT_ID/SECRET` — из `infisical-prod.env` (`WEBAPP_INFISICAL_CLIENT_ID/SECRET`);
+   плюс `REDIS_QUEUE_URL=redis://redis-queue:6379/0`. Права root:deploy 0640.
+4. **Деплой** (штатный, разделы выше): pin нового образа → pull → миграция → `systemctl restart
+   assistant` → webapp поднимается вместе со стеком.
+5. **Кнопка меню бота** (аналог set-webhook):
+
+```bash
+ssh deploy@31.76.15.130 sudo docker run --rm --network personal-assistant-prod_default \
+  --env-file /etc/assistant/bootstrap.env ghcr.io/rassadin11/vaka-assistant-v2:latest \
+  python -m core.secrets_entrypoint -- python -m gateway set-menu-button
+```
+
+Проверка: `getChatMenuButton` → `type: web_app`, url `https://vaka-assistant.ru/app/` (появляется
+через несколько секунд — propagation; сразу после set может ещё показывать `commands`).
+
+6. Проверка: `https://vaka-assistant.ru/app/healthz`=200, `/app/` отдаёт SPA,
+   `/app/api/unknown`→JSON 404, все контейнеры healthy; живой вход из Telegram владельцем.
+
+## Диагностика
+
+```bash
+ssh deploy@31.76.15.130
+systemctl status assistant
+docker ps --format '{{.Names}}\t{{.Status}}'                  # здоровье стека
+docker logs --since 30m personal-assistant-prod-gateway-1     # приём webhook (POST /webhook/… 200)
+docker logs --since 30m personal-assistant-prod-worker-1      # обработка (JSON-логи с trace_id)
+docker exec personal-assistant-prod-postgres-1 psql -U assistant -d assistant \
+  -c "select tool_name, result_status, latency_ms, created_at from tool_calls_log order by id desc limit 10"
+```
+
+Grafana наружу НЕ выведена (Caddy проксирует только webhook и Mini App; проверено 2026-07-20) — доступ через SSH-туннель:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 deploy@31.76.15.130
+# затем в браузере http://localhost:3000 — логин admin, пароль GF_SECURITY_ADMIN_PASSWORD
+# (посмотреть: ssh deploy@31.76.15.130 sudo grep GF_SECURITY /etc/assistant/infra.env)
+```
+
+Дашборды: «Технический» (очереди, латентность, ошибки LLM, стоимость/день) и «Продуктовый» (DAU/WAU, retention D7, сообщений/пользователь, доля голосовых, топ инструментов). Алерты и так приходят в канал владельца.
+
+## Известные грабли
+
+- `migrator.env`: схема DSN `postgresql+psycopg://` (см. выше).
+- Windows/Git Bash: перед docker-командами с абсолютными путями — `MSYS_NO_PATHCONV=1`.
+- `embeddings` при первом старте на новой машине качает модель — healthy может стать через ~10 минут; healthy-гейт деплоя ждёт только gateway+caddy.
+- Секретные env-файлы на сервере создаются ролью как пустые шаблоны и НЕ перезаписываются — значения живут только на сервере; при пересоздании сервера их нужно засеять заново (источник — машина владельца + генерация паролей на месте).
+- Alembic требует `alembic.ini` в образе — он копируется в Dockerfile; при смене расположения миграций править и Dockerfile.
