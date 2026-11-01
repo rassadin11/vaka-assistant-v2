@@ -19,6 +19,7 @@ def config_from_env() -> WorkerConfig:
         lock_ttl_ms=int(os.getenv("WORKER_LOCK_TTL_MS", "180000")),
         lock_extend_interval_seconds=float(os.getenv("WORKER_LOCK_EXTEND_INTERVAL_SECONDS", "60")),
         process_timeout_seconds=float(os.getenv("WORKER_PROCESS_TIMEOUT_SECONDS", "120")),
+        stall_exit_seconds=float(os.getenv("WORKER_STALL_EXIT_SECONDS", "600")),
     )
 
 

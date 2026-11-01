@@ -84,6 +84,8 @@ ButtonRows = list[list[tuple[str, str]]]
 RichSendCallback = SendCallback
 type SendPhotoCallback = Callable[[int, bytes, str | None], Awaitable[None]]
 type DownloadFileCallback = Callable[[str, int], Awaitable[bytes]]
+# Docker waits 10 s after SIGTERM before SIGKILL; two waits of 4 s fit inside it.
+BACKGROUND_STOP_GRACE_SECONDS = 4.0
 
 
 def main() -> NoReturn:
@@ -231,7 +233,11 @@ async def _run() -> None:
     )
     _install_signal_handlers(worker)
     start_worker_metrics_server()
-    queue_depth_task = asyncio.create_task(_queue_depth_collector(queue_redis))
+    background_stop = asyncio.Event()
+    queue_depth_task = asyncio.create_task(_queue_depth_collector(queue_redis, background_stop))
+    watchdog_task = asyncio.create_task(
+        _stall_watchdog(worker, config.stall_exit_seconds, background_stop)
+    )
     outbox_task = (
         asyncio.create_task(outbox_processor.run()) if outbox_processor is not None else None
     )
@@ -242,18 +248,22 @@ async def _run() -> None:
         await worker.run()
     except KeyboardInterrupt:
         worker.request_stop()
+    except Exception:
+        logging.getLogger(__name__).exception("worker loop crashed")
+        raise
     finally:
-        queue_depth_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await queue_depth_task
+        background_stop.set()
         if outbox_processor is not None:
             outbox_processor.request_stop()
         if scheduler_processor is not None:
             scheduler_processor.request_stop()
-        if outbox_task is not None:
-            await outbox_task
-        if scheduler_task is not None:
-            await scheduler_task
+        await stop_background_tasks(
+            [
+                task
+                for task in (queue_depth_task, watchdog_task, outbox_task, scheduler_task)
+                if task is not None
+            ]
+        )
         await queue_redis.aclose()
         await cache_redis.aclose()
         if service_pool is not None:
@@ -315,16 +325,82 @@ def _redis_int(value: object) -> int:
     return 0 if value is None else int(cast("str | bytes | int", value))
 
 
-async def _queue_depth_collector(queue_redis: Redis) -> None:
-    """Refresh queue-depth gauges every 15 seconds without stopping the worker on Redis errors."""
+async def _queue_depth_collector(queue_redis: Redis, stop: asyncio.Event) -> None:
+    """Refresh queue-depth gauges every 15 seconds without stopping the worker on Redis errors.
+
+    The loop ends on ``stop`` rather than relying on cancellation alone: the
+    error guard below catches every ``Exception``, so a cancel that a library
+    re-raises as an ordinary error (redis-py wraps cancels inside its own
+    timeouts) would otherwise keep the loop alive and block shutdown.
+    """
 
     logger = logging.getLogger(__name__)
-    while True:
+    while not stop.is_set():
         try:
             await collect_queue_depths(queue_redis)
         except Exception:
             logger.warning("queue depth collection failed", exc_info=True)
-        await asyncio.sleep(15)
+        with suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=15)
+
+
+async def _stall_watchdog(
+    worker: Worker,
+    stall_seconds: float,
+    stop: asyncio.Event,
+    *,
+    check_seconds: float = 30.0,
+    on_stall: Callable[[], None] | None = None,
+) -> None:
+    """Exit the process when the consume loop stops making progress.
+
+    The metrics healthcheck cannot see a wedged consume loop, and Docker only
+    restarts a container whose process has exited. Exiting hard leaves the
+    in-flight entry pending in Redis, where the next worker reclaims it.
+    """
+
+    while not stop.is_set():
+        with suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=check_seconds)
+        stalled_for = worker.seconds_since_progress()
+        if not stop.is_set() and stalled_for > stall_seconds:
+            logging.getLogger(__name__).critical(
+                "consume loop stalled for %.0f s; exiting for a restart", stalled_for
+            )
+            (on_stall or _exit_for_restart)()
+            return
+
+
+def _exit_for_restart() -> None:
+    logging.shutdown()
+    os._exit(1)
+
+
+async def stop_background_tasks(
+    tasks: list[asyncio.Task[None]],
+    *,
+    grace_seconds: float = BACKGROUND_STOP_GRACE_SECONDS,
+) -> None:
+    """Wait for stopped background loops, then cancel stragglers without waiting forever.
+
+    Shutdown must always finish so the process exits and Docker restarts it; a
+    loop that ignores its stop signal would otherwise keep a worker alive with
+    no consumer reading the queue.
+    """
+
+    if not tasks:
+        return
+    _done, pending = await asyncio.wait(tasks, timeout=grace_seconds)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.wait(pending, timeout=grace_seconds)
+    logger = logging.getLogger(__name__)
+    for task in tasks:
+        if not task.done():
+            logger.error("background task did not stop: %s", task.get_name())
+        elif not task.cancelled() and task.exception() is not None:
+            logger.error("background task failed", exc_info=task.exception())
 
 
 def _worker_metrics_port() -> int:

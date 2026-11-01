@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from redis.asyncio import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from core.envelope import UpdateEnvelope
 from core.locks import (
@@ -99,6 +100,9 @@ class WorkerConfig:
     reconnect_backoff_max_seconds: float = 10.0
     process_timeout_seconds: float = 120.0
     lock_extend_interval_seconds: float = 60.0
+    # Longer than any legitimate gap between two progress marks (one message is
+    # bounded by the lock wait, the processing timeout and reply delivery).
+    stall_exit_seconds: float = 600.0
 
 
 class Worker:
@@ -128,23 +132,36 @@ class Worker:
         self._logger = logger if logger is not None else LOGGER
         self._stop_event = asyncio.Event()
         self._next_reclaim_at = time.monotonic() + self._config.reclaim_interval_seconds
+        self._last_progress_at = time.monotonic()
 
     def request_stop(self) -> None:
         """Request a graceful stop after the current message finishes."""
 
         self._stop_event.set()
 
+    def seconds_since_progress(self) -> float:
+        """Return how long the consume loop has gone without starting an iteration or message."""
+
+        return time.monotonic() - self._last_progress_at
+
     async def run(self) -> None:
         """Run the worker until a graceful stop is requested."""
 
-        await ensure_groups(self._queue_redis)
+        groups_ready = False
         backoff = self._config.reconnect_backoff_initial_seconds
         while not self._stop_event.is_set():
+            self._last_progress_at = time.monotonic()
             try:
+                if not groups_ready:
+                    await ensure_groups(self._queue_redis)
+                    groups_ready = True
                 await self.run_once()
                 backoff = self._config.reconnect_backoff_initial_seconds
-            except RedisConnectionError as exc:
-                self._logger.warning("redis connection failed: %s", exc)
+            # redis-py applies a 5 s socket timeout by default; on one vCPU a
+            # stalled event loop trips it. That is as transient as a dropped
+            # connection: an unacknowledged entry stays pending and is reclaimed.
+            except (RedisConnectionError, RedisTimeoutError) as exc:
+                self._logger.warning("redis unavailable: %s", exc)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, self._config.reconnect_backoff_max_seconds)
 
@@ -212,6 +229,7 @@ class Worker:
         return decode_read_group_response(response, queue)
 
     async def _handle_message(self, message: QueueMessage) -> None:
+        self._last_progress_at = time.monotonic()
         token = set_trace_id(str(message.envelope.trace_id))
         try:
             await self._handle_traced_message(message)

@@ -6,6 +6,8 @@ import asyncio
 from collections.abc import Awaitable
 from typing import Any
 
+from redis.exceptions import TimeoutError as RedisTimeoutError
+
 from core.envelope import UpdateEnvelope
 from core.queue import (
     AGENT_TASK_FAILURE_TEXT,
@@ -15,6 +17,7 @@ from core.queue import (
     USER_DLQ_MESSAGE,
     QueueName,
     stream_key,
+    stream_keys,
 )
 from worker.app import RETRY_NOTICE_TEXT, Worker, WorkerConfig
 from worker.processor import Processor
@@ -654,3 +657,82 @@ async def test_dlq_diversion_of_a_scheduled_run_keeps_the_background_wording() -
     assert await worker.run_once()
 
     assert callbacks.replies == [(42, f"⏰ Утренний обзор: {AGENT_TASK_FAILURE_TEXT}")]
+
+
+class FlakyQueueRedis(FakeQueueRedis):
+    """Raise a redis-py timeout on the first group setup and the first read.
+
+    Every read yields to the event loop like a real blocking XREADGROUP, so a
+    test can drive ``Worker.run`` without the loop spinning forever.
+    """
+
+    def __init__(self, *, failures: int = 1) -> None:
+        super().__init__()
+        self.group_failures = failures
+        self.read_failures = failures
+
+    async def xgroup_create(self, name: str, groupname: str, *, id: str, mkstream: bool) -> None:
+        if self.group_failures:
+            self.group_failures -= 1
+            raise RedisTimeoutError("Timeout connecting to server")
+        await super().xgroup_create(name, groupname, id=id, mkstream=mkstream)
+
+    async def xreadgroup(
+        self,
+        groupname: str,
+        consumername: str,
+        streams: dict[str, str],
+        *,
+        count: int,
+        block: int | None,
+    ) -> object:
+        await asyncio.sleep(0.001)
+        if self.read_failures:
+            self.read_failures -= 1
+            raise RedisTimeoutError("Timeout reading from redis:6379")
+        return await super().xreadgroup(groupname, consumername, streams, count=count, block=block)
+
+
+async def test_redis_timeouts_are_retried_instead_of_crashing_the_loop() -> None:
+    queue_redis = FlakyQueueRedis()
+    queue_redis.read_responses["interactive"].append(_read_response("interactive", _envelope()))
+    callbacks = CallbackRecorder()
+    worker, _callbacks = _worker(
+        queue_redis,
+        FakeCacheRedis(),
+        callbacks=callbacks,
+        config=WorkerConfig(
+            reclaim_interval_seconds=999,
+            lock_retry_sleep_seconds=0,
+            lock_wait_timeout_seconds=0,
+            stream_order_wait_timeout_seconds=0,
+            reconnect_backoff_initial_seconds=0,
+            background_block_ms=0,
+        ),
+    )
+
+    task = asyncio.create_task(worker.run())
+    for _ in range(200):
+        if callbacks.replies:
+            break
+        await asyncio.sleep(0.01)
+    worker.request_stop()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert queue_redis.group_failures == 0
+    assert queue_redis.read_failures == 0
+    assert len(queue_redis.groups_created) == len(CONSUMER_GROUPS) * len(stream_keys("interactive"))
+    assert callbacks.replies == [(42, "hello")]
+
+
+async def test_progress_mark_is_refreshed_by_each_loop_iteration() -> None:
+    worker, _callbacks = _worker(FlakyQueueRedis(failures=0), FakeCacheRedis())
+    worker._last_progress_at -= 1_000
+    assert worker.seconds_since_progress() >= 1_000
+
+    task = asyncio.create_task(worker.run())
+    await asyncio.sleep(0.05)
+    worker.request_stop()
+    await asyncio.wait_for(task, timeout=3)
+
+    assert worker.seconds_since_progress() < 5

@@ -317,6 +317,14 @@ df -h / && docker system df
 
 Алерты в этом профиле — уведомления владельцу в Telegram при dead-letter (механизм `NotifyAdminCallback`, уже в коде). Внешний uptime-пинг ставить некуда: наружу ничего не смотрит. Признак живости — heartbeat gateway и healthcheck'и контейнеров.
 
+**Бот молчит, а все контейнеры healthy.** Healthcheck worker'а проверяет только `/metrics`, который живёт в отдельном потоке, — зависший цикл чтения он не видит. Проверка — когда текущий consumer последний раз читал очередь (`idle` в миллисекундах у самой свежей строки):
+
+```bash
+docker exec personal-assistant-small-redis-1 redis-cli --raw xinfo consumers q:interactive:0 g:interactive | paste - - - - - - - - | sort -t$'\t' -k6 -n | head -1
+```
+
+`idle` больше минуты при живом worker — цикл стоит; лечится `restart worker`, сообщения из очереди не теряются. Так было 2026-11-01: 17 часов простоя после падения на таймауте Redis. С тех пор worker сам завершается, если цикл не продвигался `WORKER_STALL_EXIT_SECONDS` (600 с), и Docker его перезапускает.
+
 ## 6. Что ещё не проверено
 
 Заполняется при первом развёртывании:
